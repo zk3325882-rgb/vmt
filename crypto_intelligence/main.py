@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
+import webbrowser
 from datetime import datetime, timezone
 
 import uvicorn
@@ -74,6 +76,13 @@ async def main() -> None:
                             log_level="warning")
     server = uvicorn.Server(config)
     tasks = [asyncio.create_task(server.serve())]
+
+    url = f"http://{settings.api_host}:{settings.api_port}/"
+    log.info("GUI dashboard available at %s", url)
+    if os.getenv("OPEN_GUI", "true").lower() not in ("0", "false", "no"):
+        # open the dashboard in the default browser (works on Windows/mac/linux)
+        import threading
+        threading.Thread(target=lambda: webbrowser.open(url), daemon=True).start()
 
     stop_event = asyncio.Event()
 
