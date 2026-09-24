@@ -7,7 +7,6 @@ Nothing here is (or claims to be) a calibrated future probability.
 """
 from __future__ import annotations
 
-import bisect
 import math
 import random
 from collections import Counter
@@ -406,7 +405,6 @@ def regime_of(row) -> list[str]:
         spread = abs(float(mfe)) + abs(float(dd))
         tags.append("HIGH_VOLATILITY" if spread >= 10 else "LOW_VOLATILITY")
     ret = row.get("return_percent")
-    fa = row.get("flow_anomaly_score")
     if ret is not None:
         tags.append("POSITIVE_MARKET_FLOW" if float(ret) >= 0
                     else "NEGATIVE_MARKET_FLOW")

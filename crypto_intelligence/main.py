@@ -21,13 +21,16 @@ from app.collectors.transfer_collector import TransferCollector
 from app.database.connection import SessionLocal, init_db
 from app.market.prices import NativeAssetPrice, PriceService
 from app.tokens.discovery import TokenDiscoveryService
-from config import settings
+from config import BASE_DIR, settings
+
+_LOG_DIR = BASE_DIR / "data"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout),
-              logging.FileHandler("data/scanner.log", encoding="utf-8")],
+              logging.FileHandler(_LOG_DIR / "scanner.log", encoding="utf-8")],
 )
 log = logging.getLogger("main")
 

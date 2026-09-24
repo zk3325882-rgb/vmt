@@ -6,6 +6,8 @@ NFT ecosystem, Utility, New Token, Unknown.
 """
 from __future__ import annotations
 
+import re
+
 STABLE_SYMBOLS = {
     "usdt", "usdc", "dai", "busd", "fdusd", "tusd", "usdd", "usde", "gusd",
     "susd", "musd", "ustc", "frax", "lusd", "cusd", "usdx", "eusd", "aUSD",
@@ -21,6 +23,16 @@ AI_HINTS = ("ai", "gpt", "neural", "brain", "compute", "gpu", "sentient")
 RWA_HINTS = ("bond", "real", "gold", "oil", "realestate", "treasury")
 NFT_HINTS = ("nft", "badger", "art")
 
+# Word-boundary matcher for AI hints: avoids substring false positives such as
+# "chain" matching "ai", "maintenance" matching "ai", etc.
+_AI_WORD_RE = re.compile(
+    r"(?:^|[\s_\-/,])(?:" + "|".join(AI_HINTS) + r")(?:$|[\s_\-/,])"
+)
+
+
+def _has_ai_hint(text: str) -> bool:
+    return _AI_WORD_RE.search(text) is not None
+
 
 def classify_token(symbol: str | None, name: str | None,
                    discovery_source: str | None = None,
@@ -34,7 +46,7 @@ def classify_token(symbol: str | None, name: str | None,
         return "Layer 1"
     if any(h in text for h in MEME_HINTS):
         return "Meme"
-    if any(h in text for h in AI_HINTS) and ("ai " in text or text.startswith("ai") or "_ai" in text or "ai_" in text or n):
+    if _has_ai_hint(text):
         return "AI"
     if any(h in text for h in DEFI_HINTS):
         return "DeFi"

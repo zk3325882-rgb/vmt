@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from app.blockchain.base import BaseChainAdapter
 from app.blockchain.evm import SEL_GET_RESERVES, SEL_TOKEN0, SEL_TOKEN1
 from app.database.models import Chain, DexPool, DexProtocol, TokenPair
-from config import ChainConfig, dex_settings
+from config import ChainConfig
 
 log = logging.getLogger("dex.pools")
 

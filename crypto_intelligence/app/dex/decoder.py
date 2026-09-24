@@ -20,10 +20,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from decimal import Decimal
 
 from app.blockchain.base import LogEntry
-from config import TRANSFER_TOPIC, V2_BURN_TOPIC, V2_MINT_TOPIC, V2_SWAP_TOPIC
+from config import TRANSFER_TOPIC, V2_BURN_TOPIC, V2_MINT_TOPIC
 
 log = logging.getLogger("dex.decoder")
 

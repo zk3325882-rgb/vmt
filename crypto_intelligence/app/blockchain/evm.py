@@ -7,6 +7,7 @@ subclasses/factories (ethereum.py / bsc.py) only carry configuration.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import logging
 import random
@@ -16,19 +17,17 @@ import time
 import httpx
 
 from app.blockchain.base import BaseChainAdapter, BlockHeader, LogEntry, TxInfo
-from config import TRANSFER_TOPIC, ChainConfig, settings
+from config import (TRANSFER_TOPIC, V2_BURN_TOPIC, V2_MINT_TOPIC,
+                    V2_SWAP_TOPIC, ChainConfig, settings)
 
 log = logging.getLogger("evm")
 
 ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 ZERO_ADDR = "0x" + "0" * 40
 
-# Phase 3 — verified ERC-4626 / V2-pool event signatures (keccak256)
-ERC4626_DEPOSIT_TOPIC = "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7"   # Deposit(sender,owner,assets,shares)
-ERC4626_WITHDRAW_TOPIC = "0xf341246adaac6f497bc2a656f546ab9e182111d630394f0c57c710a59a2cb567"  # Withdraw(owner,receiver,assets,shares)
-V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"           # Swap(sender,a0in,a1in,a0out,a1out,to)
-V2_MINT_TOPIC = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"           # Mint(sender,amount0,amount1)
-V2_BURN_TOPIC = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"           # Burn(sender,a0,a1,to)
+# Event topic constants are defined once in config.py (verified keccak256
+# signatures for ERC-4626 Deposit/Withdraw and Uniswap V2 Swap/Mint/Burn)
+# and imported above to avoid drift between modules.
 SEL_TOKEN0 = "0x0dfe1681"
 SEL_TOKEN1 = "0xd21220a7"
 SEL_GET_RESERVES = "0x0902f1ac"
@@ -74,31 +73,55 @@ class EVMAdapter(BaseChainAdapter):
         self._url = next(self._urls)
         log.info("[%s] switching RPC endpoint to %s", self.chain_key, self._url)
 
+    @staticmethod
+    def _is_permanent_rpc_error(err: Exception) -> bool:
+        """Errors that switching endpoints / retrying cannot fix.
+
+        Public free RPCs reject unfiltered eth_getLogs outright; retrying the
+        same request on another node just burns time and rate-limit budget.
+        """
+        m = str(err).lower()
+        return ("please specify an address" in m
+                or "-32701" in m                      # alchemy-style restriction
+                or "block range too large" in m
+                or "range too large" in m
+                or "exceed the maximum block range" in m
+                or "query returned more than" in m)   # max-result-count limits
+
     async def _rpc(self, method: str, params: list | None = None):
-        """Single JSON-RPC call with retry/backoff and endpoint failover."""
+        """JSON-RPC call with retry/backoff, endpoint failover and a circuit
+        breaker for permanent errors (retried requests are pinned to the
+        endpoint that served them — only genuine transient failures rotate)."""
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=settings.rpc_timeout)
-        payload = {"jsonrpc": "2.0", "id": next(self._id), "method": method,
-                   "params": params or []}
         delay = 0.5
         last_err: Exception | None = None
+        pinned_url = self._url          # don't re-rotate endpoints on retries
         for attempt in range(settings.max_retries):
+            payload = {"jsonrpc": "2.0", "id": next(self._id), "method": method,
+                       "params": params or []}
             try:
-                resp = await self._client.post(self._url, json=payload)
+                resp = await self._client.post(pinned_url, json=payload)
                 if resp.status_code == 429:
                     raise RuntimeError("rate limited (429)")
                 resp.raise_for_status()
                 data = resp.json()
                 if "error" in data:
-                    raise RuntimeError(f"RPC error: {data['error']}")
+                    err = data["error"]
+                    raise RuntimeError(f"RPC error: {err}")
                 self.connected = True
                 return data["result"]
             except Exception as e:
                 last_err = e
+                if self._is_permanent_rpc_error(e):
+                    # fail fast: caller can adapt (narrow range / add filter)
+                    raise ConnectionError(
+                        f"[{self.chain_key}] RPC {method} permanent error: {e}") from e
                 log.debug("[%s] rpc %s attempt %d failed: %s",
                           self.chain_key, method, attempt + 1, str(e)[:160])
                 if attempt >= 1 and attempt % 2 == 0:
                     await self._switch_url()
+                    pinned_url = self._url
                 await asyncio.sleep(delay + random.uniform(0, delay / 2))
                 delay = min(delay * 2, 30.0)
         raise ConnectionError(f"[{self.chain_key}] RPC {method} failed after retries: {last_err}")
@@ -117,6 +140,31 @@ class EVMAdapter(BaseChainAdapter):
 
     async def get_logs(self, from_block: int, to_block: int,
                        topics=None, addresses=None) -> list[LogEntry]:
+        """Fetch logs, auto-bisecting the range when the node rejects it
+        (too large / too many results / unfiltered-request restrictions)."""
+        try:
+            return await self._get_logs_raw(from_block, to_block, topics, addresses)
+        except ConnectionError as e:
+            msg = str(e).lower()
+            retriable = ("permanent error" in msg
+                         or "range too large" in msg
+                         or "more than" in msg
+                         or "525" in msg or "524" in msg or "timed out" in msg
+                         or "timeout" in msg)
+            if not retriable:
+                raise
+            mid = (from_block + to_block) // 2
+            if mid < to_block:      # can still split
+                log.info("[%s] getLogs %d-%d rejected, bisecting (%s)",
+                         self.chain_key, from_block, to_block,
+                         str(e)[len(f"[{self.chain_key}]"):][:120])
+                left = await self.get_logs(from_block, mid, topics, addresses)
+                right = await self.get_logs(mid + 1, to_block, topics, addresses)
+                return left + right
+            raise
+
+    async def _get_logs_raw(self, from_block: int, to_block: int,
+                            topics, addresses) -> list[LogEntry]:
         params: dict = {"fromBlock": hex(from_block), "toBlock": hex(to_block)}
         if addresses:
             params["address"] = [a.lower() for a in addresses]
@@ -150,9 +198,9 @@ class EVMAdapter(BaseChainAdapter):
     MOCK_POOL = "0x" + "cc" * 20          # uniswap_v2 TTK/MUSD pair
     MOCK_TTK = "0x" + "aa" * 20           # traded token (18 dec, $2 via pool)
     MOCK_MUSD = "0x" + "bb" * 20          # mock stable quote ($1)
-    V2_SWAP_T = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
-    V2_MINT_T = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"
-    V2_BURN_T = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"
+    V2_SWAP_T = V2_SWAP_TOPIC             # canonical values live in config.py
+    V2_MINT_T = V2_MINT_TOPIC
+    V2_BURN_T = V2_BURN_TOPIC
 
     @staticmethod
     def _w(x: int) -> str:
@@ -160,7 +208,6 @@ class EVMAdapter(BaseChainAdapter):
 
     def _mock_dex_logs(self, number: int) -> list[LogEntry]:
         """Deterministic synthetic swap/liquidity activity for MOCK_MODE."""
-        from config import TRANSFER_TOPIC
         out: list[LogEntry] = []
         base = number * 1000
         txh = "0x" + hashlib.sha256(f"dex:{number}".encode()).hexdigest()
