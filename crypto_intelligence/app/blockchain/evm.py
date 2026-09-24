@@ -7,6 +7,7 @@ subclasses/factories (ethereum.py / bsc.py) only carry configuration.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import logging
 import random
@@ -16,19 +17,17 @@ import time
 import httpx
 
 from app.blockchain.base import BaseChainAdapter, BlockHeader, LogEntry, TxInfo
-from config import TRANSFER_TOPIC, ChainConfig, settings
+from config import (TRANSFER_TOPIC, V2_BURN_TOPIC, V2_MINT_TOPIC,
+                    V2_SWAP_TOPIC, ChainConfig, settings)
 
 log = logging.getLogger("evm")
 
 ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 ZERO_ADDR = "0x" + "0" * 40
 
-# Phase 3 — verified ERC-4626 / V2-pool event signatures (keccak256)
-ERC4626_DEPOSIT_TOPIC = "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7"   # Deposit(sender,owner,assets,shares)
-ERC4626_WITHDRAW_TOPIC = "0xf341246adaac6f497bc2a656f546ab9e182111d630394f0c57c710a59a2cb567"  # Withdraw(owner,receiver,assets,shares)
-V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"           # Swap(sender,a0in,a1in,a0out,a1out,to)
-V2_MINT_TOPIC = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"           # Mint(sender,amount0,amount1)
-V2_BURN_TOPIC = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"           # Burn(sender,a0,a1,to)
+# Event topic constants are defined once in config.py (verified keccak256
+# signatures for ERC-4626 Deposit/Withdraw and Uniswap V2 Swap/Mint/Burn)
+# and imported above to avoid drift between modules.
 SEL_TOKEN0 = "0x0dfe1681"
 SEL_TOKEN1 = "0xd21220a7"
 SEL_GET_RESERVES = "0x0902f1ac"
@@ -150,9 +149,9 @@ class EVMAdapter(BaseChainAdapter):
     MOCK_POOL = "0x" + "cc" * 20          # uniswap_v2 TTK/MUSD pair
     MOCK_TTK = "0x" + "aa" * 20           # traded token (18 dec, $2 via pool)
     MOCK_MUSD = "0x" + "bb" * 20          # mock stable quote ($1)
-    V2_SWAP_T = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
-    V2_MINT_T = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"
-    V2_BURN_T = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"
+    V2_SWAP_T = V2_SWAP_TOPIC             # canonical values live in config.py
+    V2_MINT_T = V2_MINT_TOPIC
+    V2_BURN_T = V2_BURN_TOPIC
 
     @staticmethod
     def _w(x: int) -> str:
@@ -160,7 +159,6 @@ class EVMAdapter(BaseChainAdapter):
 
     def _mock_dex_logs(self, number: int) -> list[LogEntry]:
         """Deterministic synthetic swap/liquidity activity for MOCK_MODE."""
-        from config import TRANSFER_TOPIC
         out: list[LogEntry] = []
         base = number * 1000
         txh = "0x" + hashlib.sha256(f"dex:{number}".encode()).hexdigest()

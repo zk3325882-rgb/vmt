@@ -108,11 +108,20 @@ class BlockCollector:
             return
         cfg = settings.chains[self.chain_key]
         if last <= 0:
-            try:
-                head = await self.adapter.block_number()
-            except Exception:
-                await asyncio.sleep(5)
-                return await self.run()
+            # Retry with capped exponential backoff instead of recursing,
+            # so a sustained RPC outage cannot blow the stack.
+            delay = 5
+            while True:
+                try:
+                    head = await self.adapter.block_number()
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.warning("[%s] initial block_number failed (retry in %ds): %s",
+                                self.chain_key, delay, e)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 60)
             last = max(cfg.start_block, head - settings.start_lookback) - 1
             log.info("[%s] first run: starting near head at %d", self.chain_key, last + 1)
         else:

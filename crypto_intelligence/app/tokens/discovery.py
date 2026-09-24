@@ -70,7 +70,6 @@ class TokenDiscoveryService:
         with self.session_factory() as s:
             if existing:
                 existing.last_seen = ts
-                changed_meta = False
                 if not existing.has_metadata and (sym or nm or dec is not None):
                     existing.symbol = sym or existing.symbol
                     existing.name = nm or existing.name
@@ -78,7 +77,6 @@ class TokenDiscoveryService:
                     existing.has_metadata = bool(sym or nm or dec is not None)
                     existing.category = classify_token(existing.symbol, existing.name,
                                                        existing.discovery_source)
-                    changed_meta = True
                 if existing.first_transfer_block is None and block_number:
                     existing.first_transfer_block = block_number
                 s.commit()

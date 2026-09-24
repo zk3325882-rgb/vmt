@@ -14,13 +14,13 @@ from decimal import Decimal, InvalidOperation
 from app.blockchain.base import BaseChainAdapter, LogEntry
 from app.blockchain.evm import is_valid_address
 from app.database.models import (
-    Chain, LargeTransaction, MarketSnapshot, Token, TokenTransfer, Transaction,
+    Chain, LargeTransaction, MarketSnapshot, Token, TokenTransfer,
 )
 from app.market.prices import PriceService
 from app.tokens.discovery import TokenDiscoveryService
 from app.tokens.metadata import fetch_metadata
 from app.transactions.large_transactions import (
-    ZERO_ADDR, RollingStats, classify_transfer, compute_anomaly,
+    RollingStats, classify_transfer, compute_anomaly,
 )
 from config import TRANSFER_TOPIC, settings
 
@@ -195,7 +195,9 @@ class TransferCollector:
                 t = s.query(Token).filter_by(chain_pk=chain_pk, address=addr).first()
                 if t:
                     t.transfer_count = (t.transfer_count or 0) + n
-                    t.last_seen = max(t.last_seen or r["timestamp"], r["timestamp"])
+                    latest = max(r["timestamp"] for r in rows_t
+                                 if r["token_address"] == addr)
+                    t.last_seen = max(t.last_seen or latest, latest)
             for r in rows_l:
                 s.add(MarketSnapshot(chain_pk=chain_pk, token_address=r["token_address"],
                                      price_usd=None, source="transfer",

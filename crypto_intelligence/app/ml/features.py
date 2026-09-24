@@ -191,7 +191,8 @@ def to_matrix(rows: list[dict], columns: list[str]):
     return X, indicator
 
 
-def fit_imputation(X_train: np.ndarray, indicator: np.ndarray):
+def fit_imputation(X_train, indicator):
+    """Compute per-column medians for imputation (X_train: np.ndarray)."""
     import numpy as np
     medians = np.zeros(X_train.shape[1])
     for j in range(X_train.shape[1]):
@@ -201,7 +202,8 @@ def fit_imputation(X_train: np.ndarray, indicator: np.ndarray):
     return medians
 
 
-def apply_imputation(X: np.ndarray, medians: np.ndarray, indicator: np.ndarray):
+def apply_imputation(X, medians, indicator):
+    """Fill NaNs: indicators -> 0, numeric -> fitted medians (arrays: np.ndarray)."""
     import numpy as np
     out = X.copy()
     nan_mask = np.isnan(out)
