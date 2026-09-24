@@ -55,8 +55,8 @@ class ChainConfig:
 
 # Known event signature topics
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a5df525a44c"
-V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d13084064b2401"
-UNI_V3_SWAP = "0xc42079f94a6350b7e6235f3545a6eb4a61a28c9d0b44346d733d84012db6a600"
+V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+UNI_V3_SWAP = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
 
 CHAINS: dict[str, ChainConfig] = {
     "ethereum": ChainConfig(
@@ -102,8 +102,8 @@ CHAINS: dict[str, ChainConfig] = {
 }
 
 # Known event signature topics (Phase 3 additions)
-V2_MINT_TOPIC = "0x4c209b5fc8ad50758f13e2e1088ba56a56025c4f76cbaa5f261dd8d18bc8b088"   # Mint(sender, amount0, amount1)
-V2_BURN_TOPIC = "0xdccd41b57bbb3cb65f7689c6b994d95e9e177284243c04c3be7b51571d53b7d6"   # Burn(sender, amount0, amount1, to)
+V2_MINT_TOPIC = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"   # Mint(sender, amount0, amount1)
+V2_BURN_TOPIC = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"   # Burn(sender, amount0, amount1, to)
 
 
 # ---------------------------------------------------------------------------
@@ -216,3 +216,9 @@ class Settings:
 
 
 settings = Settings()
+
+
+# Phase 3 — ERC-4626 vault share events (Deposit/Withdraw with 3 indexed
+# topics) used by the observation-derived pool detector.
+ERC4626_DEPOSIT_TOPIC = "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7"
+ERC4626_WITHDRAW_TOPIC = "0xf341246adaac6f497bc2a656f546ab9e182111d630394f0c57c710a59a2cb567"

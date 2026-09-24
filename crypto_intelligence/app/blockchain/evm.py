@@ -24,9 +24,9 @@ ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 ZERO_ADDR = "0x" + "0" * 40
 
 # Phase 3 — verified ERC-4626 / V2-pool event signatures (keccak256)
-ERC4626_DEPOSIT_TOPIC = "0xeff130fb95444e20e5820222fddc02652e51e08505406dbf880e20f35d2a4dbb"   # Deposit(sender,owner,assets,shares)
-ERC4626_WITHDRAW_TOPIC = "0x70e4caaf5aaa2a6ef7ddfe659da919766fd7d13ae3f8e6762301190038e87f09"  # Withdraw(owner,receiver,assets,shares)
-V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d13084e74a1224"           # Swap(sender,a0in,a1in,a0out,a1out,to)
+ERC4626_DEPOSIT_TOPIC = "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7"   # Deposit(sender,owner,assets,shares)
+ERC4626_WITHDRAW_TOPIC = "0xf341246adaac6f497bc2a656f546ab9e182111d630394f0c57c710a59a2cb567"  # Withdraw(owner,receiver,assets,shares)
+V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"           # Swap(sender,a0in,a1in,a0out,a1out,to)
 V2_MINT_TOPIC = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"           # Mint(sender,amount0,amount1)
 V2_BURN_TOPIC = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"           # Burn(sender,a0,a1,to)
 SEL_TOKEN0 = "0x0dfe1681"
@@ -145,6 +145,57 @@ class EVMAdapter(BaseChainAdapter):
             return await self._rpc("eth_call", [{"to": to, "data": data}, "latest"])
         except Exception:
             return None
+
+    # ---- MOCK DEX fixtures (dev mode only; deterministic) ----
+    MOCK_POOL = "0x" + "cc" * 20          # uniswap_v2 TTK/MUSD pair
+    MOCK_TTK = "0x" + "aa" * 20           # traded token (18 dec, $2 via pool)
+    MOCK_MUSD = "0x" + "bb" * 20          # mock stable quote ($1)
+    V2_SWAP_T = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+    V2_MINT_T = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"
+    V2_BURN_T = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"
+
+    @staticmethod
+    def _w(x: int) -> str:
+        return f"{x:064x}"
+
+    def _mock_dex_logs(self, number: int) -> list[LogEntry]:
+        """Deterministic synthetic swap/liquidity activity for MOCK_MODE."""
+        from config import TRANSFER_TOPIC
+        out: list[LogEntry] = []
+        base = number * 1000
+        txh = "0x" + hashlib.sha256(f"dex:{number}".encode()).hexdigest()
+        user = self.MOCK_WALLETS[number % 6]
+        w = self._w
+        data_hex = (w(2 * 10 ** 18) if number % 2 == 0 else w(0)) \
+            + w(0 if number % 2 == 0 else 5 * 10 ** 18) \
+            + w(0 if number % 2 == 0 else 1 * 10 ** 18) \
+            + w(10 ** 18 if number % 2 == 0 else 0)
+        out.append(LogEntry(
+            address=self.MOCK_POOL,
+            topics=[self.V2_SWAP_T, "0x" + "0" * 24 + user[2:],
+                    "0x" + "0" * 24 + user[2:]],
+            data="0x" + data_hex, block_number=number,
+            transaction_hash=txh, log_index=base))
+        out.append(LogEntry(  # internal router hop: pool -> user (token out)
+            address=self.MOCK_TTK,
+            topics=[TRANSFER_TOPIC, "0x" + "0" * 24 + self.MOCK_POOL[2:],
+                    "0x" + "0" * 24 + user[2:]],
+            data="0x" + w(10 ** 18), block_number=number,
+            transaction_hash=txh, log_index=base + 1))
+        if number % 3 == 0:   # periodic liquidity add
+            out.append(LogEntry(
+                address=self.MOCK_POOL,
+                topics=[self.V2_MINT_T, "0x" + "0" * 24 + user[2:]],
+                data="0x" + w(10 ** 18) + w(2 * 10 ** 18),
+                block_number=number, transaction_hash=txh, log_index=base + 2))
+        if number % 7 == 0:   # rarer liquidity removal
+            out.append(LogEntry(
+                address=self.MOCK_POOL,
+                topics=[self.V2_BURN_T, "0x" + "0" * 24 + user[2:],
+                        "0x" + "0" * 24 + user[2:]],
+                data="0x" + w(5 * 10 ** 17) + w(10 ** 18),
+                block_number=number, transaction_hash=txh, log_index=base + 3))
+        return out
 
     async def get_transactions_for_block(self, number: int) -> list[TxInfo]:
         raw = await self._rpc("eth_getBlockByNumber", [hex(number), True])
