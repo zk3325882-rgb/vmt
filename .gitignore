@@ -1,7 +1,6 @@
-# Python bytecode and cache
+# Compiled and build artifacts
 __pycache__/
 *.pyc
 
-# Environment files
+# Environment
 .env
-.env.local

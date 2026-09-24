@@ -138,17 +138,42 @@ class EVMAdapter(BaseChainAdapter):
                            hash=raw.get("hash") or "",
                            timestamp=int(raw["timestamp"], 16))
 
+    @staticmethod
+    def _is_unfiltered_rejection(err: Exception) -> bool:
+        """Node refuses requests that don't pin an `address` filter.
+
+        Bisecting the block range cannot fix this — only adding an address
+        filter can — so we must never split on these errors."""
+        m = str(err).lower()
+        return ("please specify an address" in m
+                or "-32701" in m)                   # alchemy-style restriction
+
+    @staticmethod
+    def _is_range_rejection(err: Exception) -> bool:
+        """Node rejects the *size* of the requested range / result count.
+        Splitting the range into smaller pieces is the correct remedy."""
+        m = str(err).lower()
+        return ("block range too large" in m
+                or "range too large" in m
+                or "exceed the maximum block range" in m
+                or "query returned more than" in m)
+
     async def get_logs(self, from_block: int, to_block: int,
                        topics=None, addresses=None) -> list[LogEntry]:
         """Fetch logs, auto-bisecting the range when the node rejects it
-        (too large / too many results / unfiltered-request restrictions)."""
+        because the range/result set is too large.
+
+        Unfiltered-request rejections (HTTP-level "specify an address") are
+        NOT bisected — splitting cannot help; they propagate immediately so
+        callers can add an address filter or skip the query."""
         try:
             return await self._get_logs_raw(from_block, to_block, topics, addresses)
         except ConnectionError as e:
+            if self._is_unfiltered_rejection(e):
+                raise                                # bisecting is pointless
             msg = str(e).lower()
-            retriable = ("permanent error" in msg
-                         or "range too large" in msg
-                         or "more than" in msg
+            retriable = (self._is_range_rejection(e)
+                         or "permanent error" in msg
                          or "525" in msg or "524" in msg or "timed out" in msg
                          or "timeout" in msg)
             if not retriable:
