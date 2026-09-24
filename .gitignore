@@ -1,10 +1,5 @@
-# Compiled and build artifacts
-__pycache__/
-*.pyc
+# Database files
+*.db
 
-# Environment
-.env
-# Runtime artifacts
-data/*.db
-data/*.log
-data/test_out.txt
+# Logs and temp files
+*.log
