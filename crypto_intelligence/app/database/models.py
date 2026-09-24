@@ -834,3 +834,165 @@ class BacktestResult(Base):
         UniqueConstraint("backtest_id", "horizon", "group_kind", "group_value",
                          name="uq_bt_cell"),
     )
+
+
+# ===========================================================================
+# PHASE 6 — ML, probability calibration & walk-forward learning tables
+# ===========================================================================
+
+class MLModel(Base):
+    """Registered model version. Every prediction references its model_id so
+    historical results remain reproducible. `is_production` follows the
+    explicitly configured promotion rule (visible, not hidden)."""
+    __tablename__ = "ml_models"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(96), unique=True)   # e.g. LR_HIT10_24H_V001
+    model_type: Mapped[str] = mapped_column(String(32))          # logistic|random_forest|...
+    target: Mapped[str] = mapped_column(String(24), index=True)  # hit_10pct | outcome_class
+    horizon: Mapped[str] = mapped_column(String(8), index=True)
+    feature_version: Mapped[str] = mapped_column(String(16))
+    signal_engine_version: Mapped[str | None] = mapped_column(String(16))
+    ml_version: Mapped[str | None] = mapped_column(String(16))
+    training_start: Mapped[datetime | None] = mapped_column(DateTime)
+    training_end: Mapped[datetime | None] = mapped_column(DateTime)
+    validation_start: Mapped[datetime | None] = mapped_column(DateTime)
+    validation_end: Mapped[datetime | None] = mapped_column(DateTime)
+    test_start: Mapped[datetime | None] = mapped_column(DateTime)
+    test_end: Mapped[datetime | None] = mapped_column(DateTime)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    class_distribution: Mapped[str | None] = mapped_column(String(128))  # JSON
+    metrics: Mapped[str | None] = mapped_column(String(2048))            # JSON test metrics
+    calibration_method: Mapped[str | None] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(24), default="READY", index=True)
+    # READY | INSUFFICIENT_DATA | FAILED | ARCHIVED
+    is_production: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    artifact_path: Mapped[str | None] = mapped_column(String(256))
+    config_json: Mapped[str | None] = mapped_column(String(4096))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class MLPrediction(Base):
+    """Immutable prediction record. Never overwritten; keeps raw vs
+    calibrated probability separate plus all versions for reproducibility."""
+    __tablename__ = "ml_predictions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), index=True)
+    token_id: Mapped[int | None] = mapped_column(ForeignKey("tokens.id"), index=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    token_address: Mapped[str] = mapped_column(String(64), index=True)
+    model_id: Mapped[int] = mapped_column(ForeignKey("ml_models.id"), index=True)
+    model_name: Mapped[str | None] = mapped_column(String(96))
+    target: Mapped[str] = mapped_column(String(24), index=True)
+    horizon: Mapped[str] = mapped_column(String(8), index=True)
+    raw_probability: Mapped[float | None] = mapped_column(Numeric(8, 6))
+    calibrated_probability: Mapped[float | None] = mapped_column(Numeric(8, 6))
+    data_quality: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    prediction_status: Mapped[str] = mapped_column(String(24), default="OK")
+    # OK | LIMITED_DATA | NEW_TOKEN | INSUFFICIENT_HISTORY | MODEL_UNAVAILABLE
+    feature_vector: Mapped[str | None] = mapped_column(String(8192))  # exact inputs used
+    feature_timestamp: Mapped[datetime | None] = mapped_column(DateTime)
+    feature_version: Mapped[str | None] = mapped_column(String(16))
+    model_version: Mapped[str | None] = mapped_column(String(96))
+    prediction_timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
+    actual_outcome_id: Mapped[int | None] = mapped_column(
+        ForeignKey("historical_outcomes.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("signal_id", "model_id", name="uq_pred_signal_model"),
+        Index("ix_pred_token_ts", "token_address", "prediction_timestamp"),
+    )
+
+
+class MLTrainingRun(Base):
+    """Audit log of every training attempt (including failures/insufficient)."""
+    __tablename__ = "ml_training_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[int | None] = mapped_column(ForeignKey("ml_models.id"), index=True)
+    target: Mapped[str] = mapped_column(String(24), index=True)
+    horizon: Mapped[str] = mapped_column(String(8))
+    model_type: Mapped[str | None] = mapped_column(String(32))
+    configuration: Mapped[str] = mapped_column(String(4096))     # full JSON config
+    dataset_period: Mapped[str | None] = mapped_column(String(64))
+    sample_counts: Mapped[str | None] = mapped_column(String(256))  # train/val/test sizes
+    status: Mapped[str] = mapped_column(String(24), default="RUNNING", index=True)
+    # RUNNING | COMPLETED | INSUFFICIENT_DATA | FAILED
+    error: Mapped[str | None] = mapped_column(String(512))
+    duration_seconds: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class MLMetric(Base):
+    """Per-model, per-split evaluation metrics (historical statistics)."""
+    __tablename__ = "ml_metrics"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[int] = mapped_column(ForeignKey("ml_models.id"), index=True)
+    split: Mapped[str] = mapped_column(String(8))     # TRAIN|VALIDATION|TEST|WALK_FORWARD
+    metric_name: Mapped[str] = mapped_column(String(32), index=True)
+    metric_value: Mapped[float | None] = mapped_column(Numeric(14, 6))
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("model_id", "split", "metric_name", name="uq_metric"),
+    )
+
+
+class MLCalibrationBin(Base):
+    """Reliability bins from VALIDATION data only: predicted prob band vs
+    observed historical frequency. Descriptive, never a future guarantee."""
+    __tablename__ = "ml_calibration_bins"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[int] = mapped_column(ForeignKey("ml_models.id"), index=True)
+    bin_index: Mapped[int] = mapped_column(Integer)
+    bin_lo: Mapped[float] = mapped_column(Numeric(5, 4))
+    bin_hi: Mapped[float] = mapped_column(Numeric(5, 4))
+    predicted_probability: Mapped[float | None] = mapped_column(Numeric(8, 6))
+    actual_outcome_rate: Mapped[float | None] = mapped_column(Numeric(8, 6))
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (UniqueConstraint("model_id", "bin_index", name="uq_calib_bin"),)
+
+
+class MLFeatureImportance(Base):
+    __tablename__ = "ml_feature_importances"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[int] = mapped_column(ForeignKey("ml_models.id"), index=True)
+    feature: Mapped[str] = mapped_column(String(64), index=True)
+    importance: Mapped[float | None] = mapped_column(Numeric(12, 8))
+    direction: Mapped[str | None] = mapped_column(String(8))   # positive|negative|n/a
+    feature_version: Mapped[str | None] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (UniqueConstraint("model_id", "feature", name="uq_feat_imp"),)
+
+
+class MLDriftRecord(Base):
+    __tablename__ = "ml_drift"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[int] = mapped_column(ForeignKey("ml_models.id"), index=True)
+    drift_kind: Mapped[str] = mapped_column(String(16), index=True)
+    # FEATURE | PREDICTION | PERFORMANCE
+    feature: Mapped[str | None] = mapped_column(String(64))
+    psi: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    reference_window: Mapped[str | None] = mapped_column(String(64))
+    recent_window: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    # NORMAL | WATCH | DRIFT_DETECTED | PERFORMANCE_DEGRADED
+    detail: Mapped[str | None] = mapped_column(String(1024))
+    checked_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class MLWalkForwardFold(Base):
+    """One fold of a walk-forward run: train window -> unseen eval window."""
+    __tablename__ = "ml_walkforward_folds"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("ml_training_runs.id"), index=True)
+    fold_index: Mapped[int] = mapped_column(Integer)
+    train_start: Mapped[datetime] = mapped_column(DateTime)
+    train_end: Mapped[datetime] = mapped_column(DateTime)
+    test_start: Mapped[datetime] = mapped_column(DateTime)
+    test_end: Mapped[datetime] = mapped_column(DateTime)
+    train_samples: Mapped[int] = mapped_column(Integer, default=0)
+    test_samples: Mapped[int] = mapped_column(Integer, default=0)
+    metrics: Mapped[str | None] = mapped_column(String(1024))   # JSON
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (UniqueConstraint("run_id", "fold_index", name="uq_fold"),)

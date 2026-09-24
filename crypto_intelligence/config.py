@@ -298,6 +298,67 @@ class BacktestSettings:
 backtest_settings = BacktestSettings()
 
 
+# ---------------------------------------------------------------------------
+# Phase 6 — ML, probability calibration & walk-forward learning
+# ---------------------------------------------------------------------------
+@dataclass
+class MLSettings:
+    """CPU-friendly ML layer. Calibrated probabilities are HISTORICAL model
+    estimates conditioned on similar past observations — they are NOT
+    guaranteed future outcomes and must never be presented as such."""
+    enabled: bool = os.getenv("ML_ENABLED", "true").lower() in ("1", "true", "yes")
+    # minimum-sample policy: never train/fabricate on tiny datasets
+    min_train_samples: int = int(os.getenv("MIN_TRAIN_SAMPLES", "120"))
+    min_validation_samples: int = int(os.getenv("MIN_VALIDATION_SAMPLES", "40"))
+    min_test_samples: int = int(os.getenv("MIN_TEST_SAMPLES", "40"))
+    # default prediction target / horizon (configurable per training run)
+    default_target: str = os.getenv("ML_DEFAULT_TARGET", "hit_10pct")
+    default_horizon: str = os.getenv("ML_DEFAULT_HORIZON", "24h")
+    # direction convention for binary targets
+    positive_targets: tuple = ("hit_5pct", "hit_10pct", "hit_20pct")
+    negative_targets: tuple = ("hit_minus_5pct", "hit_minus_10pct")
+    # model zoo (CPU only; optional libs detected at runtime)
+    baseline_model: str = "logistic"
+    candidate_models: tuple = ("logistic", "random_forest", "hist_gradient_boosting")
+    xgboost_enabled: bool = os.getenv("XGBOOST_ENABLED", "false").lower() in ("1", "true", "yes")
+    lightgbm_enabled: bool = os.getenv("LIGHTGBM_ENABLED", "false").lower() in ("1", "true", "yes")
+    # imbalance handling (no time-leaking oversampling)
+    class_weight_balanced: bool = True
+    # calibration: sigmoid|isotonic|none — fit ONLY on validation data
+    calibration_method: str = os.getenv("CALIBRATION_METHOD", "sigmoid")
+    calibration_min_samples: int = int(os.getenv("CALIBRATION_MIN_SAMPLES", "40"))
+    reliability_bins: int = 10
+    # chronological split ratios (train/val/test) — time-series safe
+    split_train: float = float(os.getenv("ML_SPLIT_TRAIN", "0.7"))
+    split_validation: float = float(os.getenv("ML_SPLIT_VAL", "0.15"))
+    # walk-forward defaults
+    wf_train_days: int = int(os.getenv("WF_TRAIN_DAYS", "14"))
+    wf_test_days: int = int(os.getenv("WF_TEST_DAYS", "3"))
+    wf_step_days: int = int(os.getenv("WF_STEP_DAYS", "3"))
+    wf_min_train: int = int(os.getenv("WF_MIN_TRAIN", "80"))
+    # live prediction gating
+    min_feature_completeness: float = float(os.getenv("ML_MIN_COMPLETENESS", "35"))
+    max_feature_age_seconds: int = int(os.getenv("ML_MAX_FEATURE_AGE", "7200"))
+    # production selection rule (explicit + visible, not hidden):
+    # choose highest test ROC-AUC among candidates that pass
+    # min samples + Brier <= threshold. Set "" to disable auto-promotion.
+    promotion_rule: str = os.getenv("ML_PROMOTION_RULE", "max_roc_auc")
+    max_brier_for_promotion: float = float(os.getenv("ML_MAX_BRIER", "0.25"))
+    # drift monitoring thresholds (PSI-style buckets)
+    drift_watch_psi: float = float(os.getenv("DRIFT_WATCH_PSI", "0.10"))
+    drift_detected_psi: float = float(os.getenv("DRIFT_DETECTED_PSI", "0.25"))
+    drift_perf_brier_delta: float = float(os.getenv("DRIFT_PERF_BRIER", "0.05"))
+    recent_window_hours: int = int(os.getenv("DRIFT_RECENT_HOURS", "72"))
+    # artifact storage
+    models_dir: str = os.getenv("MODELS_DIR", str(BASE_DIR / "data" / "models"))
+    # periodic retraining cadence (hours); 0 disables background scheduler
+    retrain_interval_hours: float = float(os.getenv("ML_RETRAIN_INTERVAL_HOURS", "0"))
+    version: str = os.getenv("ML_VERSION", "6.0.0")
+
+
+ml_settings = MLSettings()
+
+
 # Phase 3 — ERC-4626 vault share events (Deposit/Withdraw with 3 indexed
 # topics) used by the observation-derived pool detector.
 ERC4626_DEPOSIT_TOPIC = "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7"

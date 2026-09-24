@@ -1,6 +1,6 @@
-(empty)node_modules/
-.next/
-dist/
-build/
-*.log
-node_modules/
+# Compiled and build artifacts
+__pycache__/
+*.pyc
+
+# Databases
+*.db
