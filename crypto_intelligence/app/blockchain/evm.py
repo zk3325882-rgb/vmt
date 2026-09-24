@@ -44,7 +44,8 @@ class EVMAdapter(BaseChainAdapter):
         super().__init__(cfg.key)
         self.cfg = cfg
         urls = [u for u in cfg.rpc_urls if u.startswith("http")] or list(cfg.rpc_urls)
-        self._urls = itertools.cycle(urls)          # rotate on failures
+        self._url_list = list(urls)
+        self._urls = itertools.cycle(self._url_list)   # rotate on failures
         self._url = urls[0] if urls else ""
         self._client: httpx.AsyncClient | None = None
         self._id = itertools.count(1)
@@ -53,15 +54,21 @@ class EVMAdapter(BaseChainAdapter):
     async def connect(self) -> bool:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=settings.rpc_timeout)
-        try:
-            await self.block_number()
-            self.connected = True
-            log.info("[%s] connected via %s", self.chain_key, self._url)
-            return True
-        except Exception as e:
-            log.warning("[%s] connect failed: %s", self.chain_key, str(e)[:150])
-            self.connected = False
-            return False
+        urls = self._url_list                  # every configured endpoint
+        for _ in range(len(urls)):
+            try:
+                await self.block_number()          # _rpc rotates on failures
+                self.connected = True
+                log.info("[%s] connected via %s", self.chain_key, self._url)
+                return True
+            except Exception as e:
+                log.debug("[%s] endpoint %s failed: %s",
+                          self.chain_key, self._url, str(e)[:120])
+                await self._switch_url()           # try the next one explicitly
+        log.warning("[%s] connect failed on all %d endpoints (will retry in loop)",
+                    self.chain_key, len(urls))
+        self.connected = False
+        return False
 
     async def close(self) -> None:
         if self._client:
@@ -75,10 +82,13 @@ class EVMAdapter(BaseChainAdapter):
 
     @staticmethod
     def _is_permanent_rpc_error(err: Exception) -> bool:
-        """Errors that switching endpoints / retrying cannot fix.
+        """Errors that retrying *the same request* cannot fix.
 
-        Public free RPCs reject unfiltered eth_getLogs outright; retrying the
-        same request on another node just burns time and rate-limit budget.
+        These short-circuit the retry loop so callers can adapt (add an
+        address filter, narrow the range). Note: they do NOT necessarily
+        mean "switching endpoints is useless" — one public node may reject
+        a query that another node serves fine — so get_logs keeps its
+        endpoint-rotation fallback for these (see _rotate_and_recover).
         """
         m = str(err).lower()
         return ("please specify an address" in m
@@ -87,6 +97,21 @@ class EVMAdapter(BaseChainAdapter):
                 or "range too large" in m
                 or "exceed the maximum block range" in m
                 or "query returned more than" in m)   # max-result-count limits
+
+    async def _rotate_and_recover(self, method: str, params: list | None):
+        """Last-resort recovery after a permanent-error rejection: try every
+        other configured endpoint once before giving up."""
+        last_err: Exception | None = None
+        for _ in range(len(self._url_list) + 1):
+            await self._switch_url()
+            try:
+                return await self._rpc(method, params)
+            except ConnectionError as e:
+                if self._is_unfiltered_rejection(e):
+                    raise          # no endpoint will accept this unfiltered
+                last_err = e       # maybe a different node accepts it
+        raise last_err or ConnectionError(
+            f"[{self.chain_key}] {method} rejected by all endpoints")
 
     async def _rpc(self, method: str, params: list | None = None):
         """JSON-RPC call with retry/backoff, endpoint failover and a circuit
@@ -160,42 +185,38 @@ class EVMAdapter(BaseChainAdapter):
 
     async def get_logs(self, from_block: int, to_block: int,
                        topics=None, addresses=None) -> list[LogEntry]:
-        """Fetch logs, auto-bisecting the range when the node rejects it
-        because the range/result set is too large.
+        """Fetch logs with node-restriction recovery:
 
-        Unfiltered-request rejections (HTTP-level "specify an address") are
-        NOT bisected — splitting cannot help; they propagate immediately so
-        callers can add an address filter or skip the query."""
-        try:
-            return await self._get_logs_raw(from_block, to_block, topics, addresses)
-        except ConnectionError as e:
-            if self._is_unfiltered_rejection(e):
-                raise                                # bisecting is pointless
-            msg = str(e).lower()
-            retriable = (self._is_range_rejection(e)
-                         or "permanent error" in msg
-                         or "525" in msg or "524" in msg or "timed out" in msg
-                         or "timeout" in msg)
-            if not retriable:
-                raise
-            mid = (from_block + to_block) // 2
-            if mid < to_block:      # can still split
-                log.info("[%s] getLogs %d-%d rejected, bisecting (%s)",
-                         self.chain_key, from_block, to_block,
-                         str(e)[len(f"[{self.chain_key}]"):][:120])
-                left = await self.get_logs(from_block, mid, topics, addresses)
-                right = await self.get_logs(mid + 1, to_block, topics, addresses)
-                return left + right
-            raise
-
-    async def _get_logs_raw(self, from_block: int, to_block: int,
-                            topics, addresses) -> list[LogEntry]:
+        1. Range-size rejections  -> auto-bisect the range (splitting helps).
+        2. Unfiltered rejections  -> propagate immediately (only an address
+           filter helps; callers decide -- bisecting would storm the node).
+        3. Other permanent errors -> try remaining endpoints once, then raise.
+        """
         params: dict = {"fromBlock": hex(from_block), "toBlock": hex(to_block)}
         if addresses:
             params["address"] = [a.lower() for a in addresses]
         if topics:
             params["topics"] = topics
-        raw = await self._rpc("eth_getLogs", [params]) or []
+        try:
+            raw = await self._rpc("eth_getLogs", [params]) or []
+        except ConnectionError as e:
+            if self._is_unfiltered_rejection(e):
+                raise                    # splitting/filtering is caller's job
+            if self._is_range_rejection(e):
+                mid = (from_block + to_block) // 2
+                if mid < to_block:       # can still split
+                    log.info("[%s] getLogs %d-%d rejected, bisecting (%s)",
+                             self.chain_key, from_block, to_block,
+                             str(e)[:120])
+                    left = await self.get_logs(from_block, mid, topics, addresses)
+                    right = await self.get_logs(mid + 1, to_block, topics, addresses)
+                    return left + right
+                raise
+            # Node-specific rejection (e.g. Cloudflare 525 on this endpoint):
+            # another configured endpoint may serve it -- rotate before failing.
+            log.info("[%s] getLogs %d-%d rejected by %s (%s); trying other endpoints",
+                     self.chain_key, from_block, to_block, self._url, str(e)[:120])
+            raw = await self._rotate_and_recover("eth_getLogs", [params]) or []
         out = []
         for r in raw:
             try:

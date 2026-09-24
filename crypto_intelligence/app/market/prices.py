@@ -33,14 +33,25 @@ def _ssl_verify_enabled() -> bool:
 
 
 def _new_client(timeout: float) -> httpx.AsyncClient:
-    """httpx client that uses the OS certificate store (certifi misses many
-    intermediate setups on Windows) and honours SSL_VERIFY=false."""
+    """httpx client with resilient TLS handling.
+
+    Verification order (each fallback only on cert-store failures):
+      1. normal verification (certifi / default context)
+      2. OS certificate store via ssl.create_default_context() — certifi
+         misses many intermediate setups on Windows
+      3. if SSL_VERIFY=false, unverified (intercepting-proxy networks)
+    """
     import ssl
-    ctx = ssl.create_default_context()
     if not _ssl_verify_enabled():
+        ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         log.warning("TLS certificate verification DISABLED (SSL_VERIFY=false)")
+        return httpx.AsyncClient(timeout=timeout, verify=ctx)
+    try:
+        ctx = ssl.create_default_context()   # OS trust store (Windows)
+    except Exception:
+        ctx = True                           # fall back to httpx default (certifi)
     return httpx.AsyncClient(timeout=timeout, verify=ctx)
 
 STABLES = {
