@@ -23,6 +23,16 @@ log = logging.getLogger("evm")
 ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 ZERO_ADDR = "0x" + "0" * 40
 
+# Phase 3 — verified ERC-4626 / V2-pool event signatures (keccak256)
+ERC4626_DEPOSIT_TOPIC = "0xeff130fb95444e20e5820222fddc02652e51e08505406dbf880e20f35d2a4dbb"   # Deposit(sender,owner,assets,shares)
+ERC4626_WITHDRAW_TOPIC = "0x70e4caaf5aaa2a6ef7ddfe659da919766fd7d13ae3f8e6762301190038e87f09"  # Withdraw(owner,receiver,assets,shares)
+V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d13084e74a1224"           # Swap(sender,a0in,a1in,a0out,a1out,to)
+V2_MINT_TOPIC = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"           # Mint(sender,amount0,amount1)
+V2_BURN_TOPIC = "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496"           # Burn(sender,a0,a1,to)
+SEL_TOKEN0 = "0x0dfe1681"
+SEL_TOKEN1 = "0xd21220a7"
+SEL_GET_RESERVES = "0x0902f1ac"
+
 
 def is_valid_address(a: str | None) -> bool:
     return bool(a) and bool(ADDR_RE.match(a))
@@ -152,6 +162,30 @@ class EVMAdapter(BaseChainAdapter):
                 continue
         return ts
 
+    # ---------------- Phase 3 helpers (best-effort; None on failure) -------
+    async def get_tx_receipt(self, tx_hash: str) -> dict | None:
+        """Raw receipt dict (input/to/logs). Returns None on any RPC failure —
+        swap decoding must never depend exclusively on transaction input."""
+        try:
+            return await self._rpc("eth_getTransactionReceipt", [tx_hash])
+        except Exception:
+            return None
+
+    async def fetch_token_balances(self, address: str,
+                                   tokens: list[str]) -> dict[str, int]:
+        """batch eth_call balanceOf(address); failures are simply omitted."""
+        sel = "0x70a08231" + address.lower()[2:].rjust(64, "0")
+        out: dict[str, int] = {}
+        for tok in tokens:
+            res = await self.eth_call(tok, sel)
+            if res and res != "0x" and len(res) >= 66:
+                try:
+                    out[tok.lower()] = int(res[:66], 16) if len(res) == 66 \
+                        else int(res[2:66], 16)
+                except ValueError:
+                    continue
+        return out
+
 
 class MockEVMAdapter(EVMAdapter):
     """Offline synthetic chain source for development/testing (MOCK_MODE=true).
@@ -167,12 +201,21 @@ class MockEVMAdapter(EVMAdapter):
         ("0x" + "cc" * 20, None, None, None),      # token without metadata
     ]
     MOCK_WALLETS = ["0x" + f"{i:040x}" for i in range(1, 7)]
+    # pool address -> (token0, token1, raw reserve0 units, raw reserve1 units)
+    MOCK_POOLS_RAW = {
+        "0x" + "ee" * 20: ("0x" + "aa" * 20, "0x" + "bb" * 20, 5_000_000, 500_000),
+        "0x" + "ef" * 20: ("0x" + "aa" * 20, "0x" + "cc" * 20, 2_000_000, 400_000),
+    }
 
     def __init__(self, cfg: ChainConfig):
         super().__init__(cfg)
         self._head = cfg.start_block + 1_000_000
         self._t0 = time.time()
         self.connected = True
+
+    @property
+    def MOCK_POOLS(self):
+        return {p.lower(): v for p, v in self.MOCK_POOLS_RAW.items()}
 
     async def connect(self) -> bool:
         self.connected = True
@@ -198,6 +241,17 @@ class MockEVMAdapter(EVMAdapter):
 
     async def get_logs(self, from_block, to_block, topics=None, addresses=None):
         import hashlib
+        def _match(lg) -> bool:
+            if addresses and lg.address.lower() not in {a.lower() for a in addresses}:
+                return False
+            if topics:
+                for i, t in enumerate(topics):
+                    if t is None:
+                        continue
+                    wanted = t if isinstance(t, list) else [t]
+                    if i >= len(lg.topics) or lg.topics[i].lower() not in {w.lower() for w in wanted}:
+                        return False
+            return True
         logs = []
         for blk in range(from_block, to_block + 1):
             h = int(hashlib.md5(f"{self.chain_key}:{blk}".encode()).hexdigest()[:8], 16)
@@ -214,14 +268,71 @@ class MockEVMAdapter(EVMAdapter):
                     topics=[TRANSFER_TOPIC, self._topic(frm), self._topic(to)],
                     data="0x" + big, block_number=blk, transaction_hash=txh,
                     log_index=i))
-        return logs
+            # ---- Phase 3 mock DEX activity on deterministic blocks -------
+            if h % 5 == 0:
+                pools = sorted(self.MOCK_POOLS.items())
+                pool_addr, (t0, t1, _, _) = pools[h % len(pools)]
+                user = self.MOCK_WALLETS[h % 6]
+                w32 = lambda v: format(v, "064x")
+                amt_in = (10_000 + (h % 50) * 500) << 6          # MUSD 6-dec
+                amt_out = (amt_in // 2000) << 12                 # MOCK 18-dec
+                if h % 10 == 5:      # SELL_LIKE direction
+                    logs.append(LogEntry(address=t0, topics=[TRANSFER_TOPIC,
+                        self._topic(user), self._topic(pool_addr)],
+                        data="0x" + w32(amt_out), block_number=blk,
+                        transaction_hash=txh, log_index=899))
+                logs.append(LogEntry(
+                    address=pool_addr,
+                    topics=[V2_SWAP_TOPIC, self._topic(user),
+                            self._topic(user if h % 10 != 5 else user)],
+                    data="0x" + (w32(0) + w32(amt_in) + w32(amt_out) + w32(0)
+                                 if h % 10 != 5 else
+                                 w32(amt_out) + w32(0) + w32(0) + w32(amt_in)),
+                    block_number=blk, transaction_hash=txh, log_index=900))
+                logs.append(LogEntry(
+                    address=t1, topics=[TRANSFER_TOPIC, self._topic(pool_addr),
+                                        self._topic(user)],
+                    data="0x" + w32(amt_out), block_number=blk,
+                    transaction_hash=txh, log_index=901))
+            if h % 23 == 0:      # liquidity burn (removal) event
+                pools = sorted(self.MOCK_POOLS.items())
+                pool_addr, _ = pools[h % len(pools)]
+                lp = self.MOCK_WALLETS[(h + 2) % 6]
+                w32 = lambda v: format(v, "064x")
+                logs.append(LogEntry(
+                    address=pool_addr,
+                    topics=[V2_BURN_TOPIC, self._topic(lp)],
+                    data="0x" + w32(50_000 << 18) + w32(25_000 << 6)
+                         + "0" * 24 + lp[2:],
+                    block_number=blk, transaction_hash=txh, log_index=950))
+            if h % 29 == 0:      # liquidity mint (addition) event
+                pools = sorted(self.MOCK_POOLS.items())
+                pool_addr, _ = pools[h % len(pools)]
+                lp = self.MOCK_WALLETS[(h + 4) % 6]
+                w32 = lambda v: format(v, "064x")
+                logs.append(LogEntry(
+                    address=pool_addr,
+                    topics=[V2_MINT_TOPIC, self._topic(lp)],
+                    data="0x" + w32(30_000 << 18) + w32(15_000 << 6),
+                    block_number=blk, transaction_hash=txh, log_index=960))
+        return [l for l in logs if _match(l)]
 
     async def eth_call(self, to: str, data: str) -> str | None:
         to = to.lower()
+        sel = data[:10]
+        # MOCK DEX pool: token0()/token1()/getReserves() for synthetic pairs
+        if to in {p.lower() for p in self.MOCK_POOLS}:
+            t0, t1, r0, r1 = self.MOCK_POOLS[to]
+            if sel == "0x0dfe1681":   # token0()
+                return "0x" + "0" * 24 + t0[2:]
+            if sel == "0xd21220a7":   # token1()
+                return "0x" + "0" * 24 + t1[2:]
+            if sel == "0x0902f1ac":   # getReserves()
+                return ("0x" + f"{r0 << 18:064x}" + f"{r1 << (12 if t1.endswith('bb' * 20) else 18):064x}"
+                        + "0" * 64)
         for addr, sym, name, dec in self.MOCK_TOKENS:
             if addr.lower() != to:
                 continue
-            sel = data[:10]
             if sel == "0x06fdde03" and name:      # name()
                 enc = name.encode().hex()
                 return "0x" + "0"*62 + "20" + "0"*62 + f"{len(name):x}".rjust(64, "0") + enc.ljust(((-len(enc)-1)//64+1)*64, "0")
@@ -238,3 +349,9 @@ class MockEVMAdapter(EVMAdapter):
         return [TxInfo(hash=txh, from_address=self.MOCK_WALLETS[number % 6],
                        to_address=self.MOCK_WALLETS[(number + 1) % 6],
                        block_number=number)]
+
+    async def get_tx_receipt(self, tx_hash: str) -> dict | None:
+        # deterministic pseudo-receipt: every 5th tx went through a router
+        num = int(tx_hash[2:10], 16)
+        sel = "0x7ff36ab5" if num % 5 == 0 else "0x83bd37f9"
+        return {"transactionHash": tx_hash, "input": sel + "00" * 32}

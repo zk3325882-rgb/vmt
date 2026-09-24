@@ -365,3 +365,233 @@ class WalletCluster(Base):
                          "relationship_type", name="uq_cluster_member"),
         Index("ix_cluster_chain_type", "chain_pk", "relationship_type"),
     )
+
+
+# ===========================================================================
+# PHASE 3 — DEX trading, capital flow, liquidity & market-impact tables
+# (Phase 1/2 tables untouched; all new writes are deduplicated by unique keys)
+# ===========================================================================
+
+class DexProtocol(Base):
+    """Configurable DEX protocol registry (one row per chain+protocol)."""
+    __tablename__ = "dex_protocols"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(16), default="v2")   # v2 | v3 | ...
+    factory_address: Mapped[str | None] = mapped_column(String(64))
+    routers: Mapped[str | None] = mapped_column(String(512))      # CSV
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("chain_pk", "name", name="uq_dex_protocol"),
+    )
+
+
+class DexPool(Base):
+    """Tracked AMM pool. `source` distinguishes factory PairCreated discovery
+    from observation-derived pools (a contract that both holds two tokens and
+    emits Swap events)."""
+    __tablename__ = "dex_pools"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    pool_address: Mapped[str] = mapped_column(String(64), index=True)
+    dex_name: Mapped[str] = mapped_column(String(64), index=True)
+    token0: Mapped[str] = mapped_column(String(64), index=True)
+    token1: Mapped[str] = mapped_column(String(64), index=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    liquidity_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    reserve0: Mapped[int | None] = mapped_column(BigIntString)
+    reserve1: Mapped[int | None] = mapped_column(BigIntString)
+    volume_24h_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    source: Mapped[str] = mapped_column(String(24), default="pair_created")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    __table_args__ = (
+        UniqueConstraint("chain_pk", "pool_address", name="uq_pool_chain_address"),
+        Index("ix_pool_tokens", "chain_pk", "token0", "token1"),
+        Index("ix_pool_token_any", "token0"),
+    )
+
+
+class DexSwap(Base):
+    """Normalized user-level DEX swap (router internal hops grouped away).
+    amounts stored raw (BigInteger-safe) + normalized Decimal; never float."""
+    __tablename__ = "dex_swaps"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    tx_hash: Mapped[str] = mapped_column(String(80), index=True)
+    log_index: Mapped[int] = mapped_column(Integer, default=0)
+    block_number: Mapped[int] = mapped_column(BigInteger, index=True)
+    wallet_address: Mapped[str] = mapped_column(String(64), index=True)
+    dex_name: Mapped[str] = mapped_column(String(64), index=True)
+    pool_address: Mapped[str] = mapped_column(String(64), index=True)
+    token_in: Mapped[str | None] = mapped_column(String(64), index=True)
+    token_out: Mapped[str | None] = mapped_column(String(64), index=True)
+    amount_in_raw: Mapped[int | None] = mapped_column(BigIntString)
+    amount_out_raw: Mapped[int | None] = mapped_column(BigIntString)
+    amount_in: Mapped[float | None] = mapped_column(Numeric(40, 18))
+    amount_out: Mapped[float | None] = mapped_column(Numeric(40, 18))
+    usd_value: Mapped[float | None] = mapped_column(Numeric(30, 2), index=True)
+    classification: Mapped[str] = mapped_column(String(16), default="UNKNOWN_SWAP",
+                                                index=True)
+    price_impact_pct: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    liquidity_impact: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    is_user_trade: Mapped[bool] = mapped_column(Boolean, default=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    __table_args__ = (
+        UniqueConstraint("chain_pk", "tx_hash", "log_index", name="uq_swap_log"),
+        Index("ix_swap_wallet_ts", "wallet_address", "timestamp"),
+        Index("ix_swap_token_out_ts", "token_out", "timestamp"),
+        Index("ix_swap_token_in_ts", "token_in", "timestamp"),
+        Index("ix_swap_class_usd", "classification", "usd_value"),
+    )
+
+
+class LiquidityEvent(Base):
+    """LIQUIDITY_ADD / LIQUIDITY_REMOVE observed via pool Mint/Burn events
+    (+ LP-token transfers). A large removal is a high-priority event — it is
+    NOT automatically called a rug pull."""
+    __tablename__ = "liquidity_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    tx_hash: Mapped[str] = mapped_column(String(80), index=True)
+    log_index: Mapped[int] = mapped_column(Integer, default=0)
+    pool_address: Mapped[str] = mapped_column(String(64), index=True)
+    dex_name: Mapped[str] = mapped_column(String(64))
+    wallet_address: Mapped[str] = mapped_column(String(64), index=True)
+    event_type: Mapped[str] = mapped_column(String(24), index=True)
+    amount0_raw: Mapped[int | None] = mapped_column(BigIntString)
+    amount1_raw: Mapped[int | None] = mapped_column(BigIntString)
+    usd_value: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    liquidity_before_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    liquidity_after_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    liquidity_change_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    liquidity_change_pct: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    __table_args__ = (
+        UniqueConstraint("chain_pk", "tx_hash", "log_index", name="uq_liq_event_log"),
+        Index("ix_liq_pool_ts", "pool_address", "timestamp"),
+    )
+
+
+class LiquiditySnapshot(Base):
+    __tablename__ = "liquidity_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    pool_address: Mapped[str] = mapped_column(String(64), index=True)
+    token0: Mapped[str] = mapped_column(String(64))
+    token1: Mapped[str] = mapped_column(String(64))
+    liquidity_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    reserve0: Mapped[int | None] = mapped_column(BigIntString)
+    reserve1: Mapped[int | None] = mapped_column(BigIntString)
+    volume_24h_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    __table_args__ = (Index("ix_liqsnap_pool_ts", "pool_address", "timestamp"),)
+
+
+class TokenFlowSnapshot(Base):
+    """Incremental aggregated buy/sell flow per token per time bucket.
+    bucket_seconds in {60,300,900,3600,14400,86400}; rows are updated with
+    DB-side deltas (never recomputed from raw history)."""
+    __tablename__ = "token_flow_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    token_address: Mapped[str] = mapped_column(String(64), index=True)
+    bucket_seconds: Mapped[int] = mapped_column(Integer, index=True)
+    bucket_start: Mapped[datetime] = mapped_column(DateTime, index=True)
+    buy_volume_usd: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    sell_volume_usd: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    net_flow_usd: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    buy_count: Mapped[int] = mapped_column(Integer, default=0)
+    sell_count: Mapped[int] = mapped_column(Integer, default=0)
+    large_buy_volume: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    large_sell_volume: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    whale_buy_volume: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    whale_sell_volume: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    other_swap_volume: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    liquidity_change_usd: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("chain_pk", "token_address", "bucket_seconds",
+                         "bucket_start", name="uq_flow_bucket"),
+        Index("ix_flow_token_bucket_time", "token_address", "bucket_seconds",
+              "bucket_start"),
+    )
+
+
+class WalletTradeSnapshot(Base):
+    """Per-wallet DEX trading aggregates (updated incrementally)."""
+    __tablename__ = "wallet_trade_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    wallet_address: Mapped[str] = mapped_column(String(64), index=True)
+    buy_count: Mapped[int] = mapped_column(Integer, default=0)
+    sell_count: Mapped[int] = mapped_column(Integer, default=0)
+    other_count: Mapped[int] = mapped_column(Integer, default=0)
+    buy_volume_usd: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    sell_volume_usd: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    net_trading_flow_usd: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    largest_buy_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    largest_sell_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    favorite_dex: Mapped[str | None] = mapped_column(String(64))
+    favorite_token: Mapped[str | None] = mapped_column(String(64))
+    last_trade_at: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow,
+                                                 onupdate=utcnow)
+    __table_args__ = (
+        UniqueConstraint("chain_pk", "wallet_address", name="uq_wtradetx_chain_addr"),
+    )
+
+
+class MarketImpactEvent(Base):
+    """Ranked market-impact events: LARGE_BUY / LARGE_SELL / WHALE_BUY /
+    WHALE_SELL / LIQUIDITY_ADD / LIQUIDITY_REMOVE / HIGH_IMPACT_SWAP /
+    CROSS_DEX_ACTIVITY / FLOW_ANOMALY / PRICE_DISCREPANCY."""
+    __tablename__ = "market_impact_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    token_address: Mapped[str | None] = mapped_column(String(64), index=True)
+    token_symbol: Mapped[str | None] = mapped_column(String(64))
+    wallet_address: Mapped[str | None] = mapped_column(String(64), index=True)
+    pool_address: Mapped[str | None] = mapped_column(String(64))
+    dex_name: Mapped[str | None] = mapped_column(String(64))
+    tx_hash: Mapped[str | None] = mapped_column(String(80), index=True)
+    usd_value: Mapped[float | None] = mapped_column(Numeric(30, 2), index=True)
+    liquidity_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    liquidity_impact: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    price_impact_pct: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    whale_score: Mapped[float | None] = mapped_column(Numeric(6, 2), index=True)
+    impact_score: Mapped[float] = mapped_column(Numeric(6, 2), default=0, index=True)
+    explanation: Mapped[str | None] = mapped_column(String(512))
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    __table_args__ = (
+        UniqueConstraint("tx_hash", "event_type", "wallet_address",
+                         name="uq_impact_event"),
+        Index("ix_impact_type_ts", "event_type", "timestamp"),
+        Index("ix_impact_token_ts", "token_address", "timestamp"),
+    )
+
+
+class FlowAnomaly(Base):
+    """flow_anomaly_score 0-100 per token per hourly window (deduped)."""
+    __tablename__ = "flow_anomalies"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    token_address: Mapped[str] = mapped_column(String(64), index=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime, index=True)
+    current_volume_usd: Mapped[float] = mapped_column(Numeric(30, 2), default=0)
+    baseline_volume_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    relative_volume: Mapped[float | None] = mapped_column(Numeric(20, 4))
+    buy_sell_ratio: Mapped[float | None] = mapped_column(Numeric(20, 4))
+    imbalance: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    whale_participation: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    flow_acceleration_pct: Mapped[float | None] = mapped_column(Numeric(20, 4))
+    anomaly_score: Mapped[float] = mapped_column(Numeric(6, 2), default=0, index=True)
+    reasons: Mapped[str | None] = mapped_column(String(512))
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    __table_args__ = (
+        UniqueConstraint("chain_pk", "token_address", "window_start",
+                         name="uq_flow_anomaly_window"),
+        Index("ix_anomaly_token_ts", "token_address", "timestamp"),
+    )
