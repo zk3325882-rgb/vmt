@@ -1,31 +1,46 @@
 """Chain manager: instantiates adapters for every configured chain.
 
-Adding Polygon/Arbitrum/Base/... later = add a ChainConfig entry and a small
-factory module like ethereum.py; nothing in the scanner core changes.
+Adding Polygon/Arbitrum/Base/... = add a ChainConfig entry in config.py;
+the generic EVM factory below picks it up automatically (no per-chain code).
+ENABLE_CHAINS env var (CSV) restricts which chains run, e.g.:
+    ENABLE_CHAINS=ethereum,bsc,polygon
 """
 from __future__ import annotations
 
 import logging
 
 from app.blockchain.base import BaseChainAdapter
-from app.blockchain import ethereum, bsc
-from config import settings
+from app.blockchain.evm import EVMAdapter, MockEVMAdapter
+from config import CHAINS, settings
 
 log = logging.getLogger("manager")
 
-# registry: chain key -> factory(mock?)->adapter. Future chains plug in here.
-FACTORIES = {
-    "ethereum": ethereum.make_adapter,
-    "bsc": bsc.make_adapter,
-}
+
+def _make_for(key: str):
+    """Factory closure for any chain key registered in config.CHAINS."""
+    def factory(mock: bool | None = None) -> BaseChainAdapter:
+        use_mock = settings.mock_mode if mock is None else mock
+        cls = MockEVMAdapter if use_mock else EVMAdapter
+        return cls(CHAINS[key])
+    return factory
+
+
+# registry built from config — every ChainConfig entry gets an adapter
+FACTORIES = {key: _make_for(key) for key in CHAINS}
 
 
 class ChainManager:
     def __init__(self, mock: bool | None = None):
+        enabled = [k.strip().lower() for k in
+                   (settings.enabled_chains or "").split(",") if k.strip()]
         self.adapters: dict[str, BaseChainAdapter] = {}
         for key, factory in FACTORIES.items():
-            if key in settings.chains:
-                self.adapters[key] = factory(mock)
+            if key not in settings.chains:
+                continue
+            if enabled and key not in enabled:
+                log.info("chain %s disabled via ENABLE_CHAINS - skipping", key)
+                continue
+            self.adapters[key] = factory(mock)
 
     async def connect_all(self) -> dict[str, bool]:
         results = {}

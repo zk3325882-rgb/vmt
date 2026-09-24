@@ -61,10 +61,28 @@ STABLES = {
     "bsc": {"0x55d398326f99059ff775485246999027b3197955": 1.0,        # USDT-BSC
             "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d": 1.0,        # USDC-BSC
             "0xe9e7cea3dedca5984780bafc599bd69add087d56": 1.0},       # BUSD
+    "polygon": {"0xc2132d05d31c914a87c6611c10748aeb04b58e8f": 1.0,     # USDT-POL
+                "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": 1.0,     # USDC-POL
+                "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": 1.0},    # USDC.e
+    "arbitrum": {"0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": 1.0,    # USDT-ARB
+                 "0xaf88d065e77c8cc2239327c5edb3a432268e5831": 1.0,    # USDC-ARB
+                 "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": 1.0},   # DAI-ARB
+    "base": {"0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": 1.0,        # USDC-base
+             "0x50c5725949a6f0c72e6c4a641f24049a917b05d6": 1.0},       # DAI-base
+    "avalanche": {"0x9702230a8ea53601f5cd2dc00fdbc13d4df4a8c7": 1.0,   # USDT.e
+                  "0xb97ef9ef8734c71904d8002f8b6bc66dd9c48a6e": 1.0,   # USDC.e
+                  "0xa7d7079b0fead91f3e65f86e8915cb59c1a4c664": 1.0},  # BUSD-old
+    "optimism": {"0x94b008aa00579c1307b0ef2c499ad98a8ce52e29": 1.0,    # USDT-OP
+                 "0x0b2c63201a148f601191ba522abedcee4f0a4f3b": 1.0},   # DAI-OP
 }
 # wrapped native assets per chain
 WRAPPED_NATIVE = {"ethereum": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
-                  "bsc": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"}
+                  "bsc": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+                  "polygon": "0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270",
+                  "arbitrum": "0x82af49447d8a07e3bd9be453dec135b0d3b18c7b",
+                  "base": "0x4200000000000000000000000000000000000006",
+                  "avalanche": "0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7",
+                  "optimism": "0x4200000000000000000000000000000000000006"}
 
 
 class PriceProvider:

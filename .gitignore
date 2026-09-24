@@ -1,5 +1,8 @@
-# Database files
+# Git bundles
+*.bundle
+
+# Databases
 *.db
 
-# Logs and temp files
+# Logs
 *.log

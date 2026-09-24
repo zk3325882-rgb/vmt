@@ -104,7 +104,100 @@ CHAINS: dict[str, ChainConfig] = {
         ),
         start_block=35_000_000,
     ),
+    # ---- Phase 7 expansion: additional EVM chains (all generic adapters) ----
+    "polygon": ChainConfig(
+        key="polygon", name="Polygon PoS", chain_id=137,
+        rpc_urls=_csv(os.getenv("POLYGON_RPC_URL")) or [
+            "https://polygon-bor-rpc.publicnode.com",
+            "https://polygon-rpc.com",
+            "https://polygon.drpc.org",
+            "https://1rpc.io/matic",
+        ],
+        symbol="MATIC", coingecko_id="matic-network",
+        dexes=(
+            DexConfig("quickswap_v2", "0xa03be7D54B45F7aF5573CAC90780a7009CE4ef7e",
+                      routers=("0xf06f6d847f95ebaaf338ebe16c62eb11111f780b",)),
+            DexConfig("sushiswap_polygon", "0xc350adb7a5cf5bf39336605c427b0cb1b06f3d65",
+                      routers=("0x1dca3cf4f9ea292e01e63fbc1a7e52eccbafedff",)),
+        ),
+        start_block=9_000_000,
+    ),
+    "arbitrum": ChainConfig(
+        key="arbitrum", name="Arbitrum One", chain_id=42161,
+        rpc_urls=_csv(os.getenv("ARBITRUM_RPC_URL")) or [
+            "https://arbitrum-one-rpc.publicnode.com",
+            "https://arb1.arbitrum.io/rpc",
+            "https://arbitrum.drpc.org",
+            "https://1rpc.io/arb",
+        ],
+        symbol="ETH", coingecko_id="ethereum",
+        dexes=(
+            DexConfig("uniswap_v3_arb", "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+                      kind="v3", swap_topic=UNI_V3_SWAP,
+                      routers=("0x68b3465833fb72a70ecdef46cd56a25da5507a6e",)),
+            DexConfig("camelot_v2", "0x6Ec0939FeBB7FE4Dce48223AfB64d64F15173AF9",
+                      pair_created_topic="0x383064bb0600dced5a62e189a69eeaa09b7dad02a10d6b6e4e2b3b12128f0bfc",
+                      routers=("0x0278bfd2389c63ccf731afdccb47fbb61a7d917a",)),
+        ),
+        start_block=170_000_000,
+    ),
+    "base": ChainConfig(
+        key="base", name="Base", chain_id=8453,
+        rpc_urls=_csv(os.getenv("BASE_RPC_URL")) or [
+            "https://base-rpc.publicnode.com",
+            "https://mainnet.base.org",
+            "https://base.drpc.org",
+            "https://1rpc.io/base",
+        ],
+        symbol="ETH", coingecko_id="ethereum",
+        dexes=(
+            DexConfig("uniswap_v3_base", "0x33128a8fC178698547A91E0726fC13F461e16c79",
+                      kind="v3", swap_topic=UNI_V3_SWAP),
+            DexConfig("aerodrome_v2", "0x420DD381b31aEf66836bfE69a821e2ad7c0d59b0",
+                      swap_topic="0x1ce176c79e8c23abc7ec77e37ade2dd1c3d304813ec35bbe2f56ed04b72043db"),
+        ),
+        start_block=28_000_000,
+    ),
+    "avalanche": ChainConfig(
+        key="avalanche", name="Avalanche C-Chain", chain_id=43114,
+        rpc_urls=_csv(os.getenv("AVAX_RPC_URL")) or [
+            "https://avalanche-c-chain-rpc.publicnode.com",
+            "https://api.avax.network/ext/bc/C/rpc",
+            "https://avalanche.drpc.org",
+            "https://1rpc.io/avax/c",
+        ],
+        symbol="AVAX", coingecko_id="avalanche-2",
+        dexes=(
+            DexConfig("traderjoe_v2", "0x43588D554a82F65764875f5813F1071D2FF20616",
+                      pair_created_topic="0x10f27ee44aab5209253cb397e4b180973961ad39e98512dc8104d92582b4858c",
+                      routers=("0x6e2a7ae06f473d9c6951703d0610f580f2d37af5",)),
+            DexConfig("pangolin_v2", "0xefa94DE7a4656D78766cD740f4964Fc7BcA8a3de"),
+        ),
+        start_block=1_000_000_000,
+    ),
+    "optimism": ChainConfig(
+        key="optimism", name="OP Mainnet", chain_id=10,
+        rpc_urls=_csv(os.getenv("OPTIMISM_RPC_URL")) or [
+            "https://optimism-rpc.publicnode.com",
+            "https://mainnet.optimism.io",
+            "https://optimism.drpc.org",
+            "https://1rpc.io/op",
+        ],
+        symbol="ETH", coingecko_id="ethereum",
+        dexes=(
+            DexConfig("velodrome_v2", "0xa062aE8A9c5e3a381282904DF6B34AA2E6A9A2E3",
+                      swap_topic="0x1ce176c79e8c23abc7ec77e37ade2dd1c3d304813ec35bbe2f56ed04b72043db"),
+            DexConfig("uniswap_v3_op", "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+                      kind="v3", swap_topic=UNI_V3_SWAP),
+        ),
+        start_block=125_000_000,
+    ),
 }
+
+# Native / wrapped-native symbols per chain — used by the classifier so a
+# "USDT"-style check never mislabels e.g. WBNB on BSC. Chain-agnostic set.
+NATIVE_SYMBOLS: set[str] = {"weth", "eth", "wbtc", "bnb", "wbnb", "wmatic",
+                            "matic", "pol", "avax", "wavax", "wtmatic"}
 
 # Known event signature topics (Phase 3 additions)
 V2_MINT_TOPIC = "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f"   # Mint(sender, amount0, amount1)
@@ -143,6 +236,11 @@ class WalletSettings:
     whale_floor_usd: dict = field(default_factory=lambda: {
         "ethereum": float(os.getenv("WHALE_FLOOR_ETH_USD", "50000")),
         "bsc": float(os.getenv("WHALE_FLOOR_BSC_USD", "10000")),
+        "polygon": float(os.getenv("WHALE_FLOOR_POLYGON_USD", "5000")),
+        "arbitrum": float(os.getenv("WHALE_FLOOR_ARBITRUM_USD", "20000")),
+        "base": float(os.getenv("WHALE_FLOOR_BASE_USD", "10000")),
+        "avalanche": float(os.getenv("WHALE_FLOOR_AVAX_USD", "10000")),
+        "optimism": float(os.getenv("WHALE_FLOOR_OPTIMISM_USD", "10000")),
     })
     exchange_label_source: str = os.getenv("EXCHANGE_LABEL_SOURCE", "local")
     dex_label_source: str = os.getenv("DEX_LABEL_SOURCE", "local")
@@ -218,6 +316,9 @@ class Settings:
     rpc_timeout: float = float(os.getenv("RPC_TIMEOUT", "15"))
     max_retries: int = int(os.getenv("RPC_MAX_RETRIES", "6"))
     chains: dict[str, ChainConfig] = field(default_factory=lambda: CHAINS)
+    # CSV of chain keys to run ("" = all configured chains), e.g.
+    # ENABLE_CHAINS=ethereum,bsc,polygon
+    enabled_chains: str = os.getenv("ENABLE_CHAINS", "")
 
 
 settings = Settings()
