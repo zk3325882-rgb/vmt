@@ -35,7 +35,7 @@ logging.basicConfig(
 log = logging.getLogger("main")
 
 
-async def run_scanner() -> dict[str, BlockCollector]:
+async def run_scanner() -> tuple[dict[str, BlockCollector], "TokenDiscoveryService"]:
     init_db()
     discovery = TokenDiscoveryService(SessionLocal)
     manager = ChainManager(mock=settings.mock_mode)
@@ -55,17 +55,18 @@ async def run_scanner() -> dict[str, BlockCollector]:
                                          transfer_collector, dex_collector, discovery)
         collectors[key] = block_collector
         asyncio.create_task(block_collector.run(), name=f"scan-{key}")
-    return collectors
+    return collectors, discovery
 
 
 async def main() -> None:
     log.info("=== Crypto Intelligence Scanner (Phase 1) === mock=%s db=%s",
              settings.mock_mode, settings.database_url)
-    collectors = await run_scanner()
+    collectors, discovery = await run_scanner()
 
     # hand scanner state to the API/dashboard
     from app.api.server import SCANNER, app
     SCANNER["collectors"] = collectors
+    SCANNER["discovery"] = discovery
     SCANNER["started_at"] = datetime.now(timezone.utc).isoformat()
     SCANNER["mock_mode"] = settings.mock_mode
 

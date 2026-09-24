@@ -1,11 +1,12 @@
 """FastAPI local API + lightweight auto-refreshing HTML dashboard."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -14,6 +15,7 @@ from app.database.connection import get_session
 from app.database.models import (
     Chain, LargeTransaction, ScannerState, Token, TokenPair, TokenTransfer,
 )
+from app.tokens.classifier import CATEGORIES as CLASSIFIER_CATEGORIES
 from config import settings
 
 log = logging.getLogger("api")
@@ -21,10 +23,10 @@ log = logging.getLogger("api")
 app = FastAPI(title="Crypto Intelligence Scanner", version="1.0")
 
 # populated by main.py at startup so endpoints can read live scanner state
-SCANNER: dict = {"collectors": {}, "started_at": None, "mock_mode": settings.mock_mode}
+SCANNER: dict = {"collectors": {}, "discovery": None, "started_at": None,
+                 "mock_mode": settings.mock_mode}
 
-CATEGORIES = ["Layer 1", "Layer 2", "Meme", "DeFi", "Stablecoin", "Gaming",
-              "AI", "RWA", "NFT ecosystem", "Utility", "New Token", "Unknown"]
+CATEGORIES = ["Watched"] + CLASSIFIER_CATEGORIES
 
 
 def _chain_map(s: Session) -> dict[int, Chain]:
@@ -188,6 +190,59 @@ def big_out(chain: Optional[str] = None, category: Optional[str] = None,
     return query_large(s, chain, "OUT", category, min_usd, min_score, sort, limit)
 
 
+# ---- coin-address watch list (big-tx capture for specific tokens) --------
+def _discovery():
+    d = SCANNER.get("discovery")
+    if d is None:
+        raise HTTPException(503, "scanner not started yet")
+    return d
+
+
+@app.get("/api/watch")
+def watch_list(s: Session = Depends(get_session)):
+    ch = _chain_map(s)
+    rows = (s.query(Token).filter_by(discovery_source="manual_watch")
+            .order_by(Token.first_seen.desc()).all())
+    return [{"address": t.address,
+             "chain": ch[t.chain_pk].key if t.chain_pk in ch else None,
+             "symbol": t.symbol, "name": t.name,
+             "transfer_count": t.transfer_count,
+             "first_seen": t.first_seen.isoformat() if t.first_seen else None}
+            for t in rows]
+
+
+@app.post("/api/watch")
+async def watch_add(payload: dict = Body(...)):
+    chain_key = (payload.get("chain") or "").strip().lower()
+    address = (payload.get("address") or "").strip()
+    if not chain_key or not address:
+        raise HTTPException(422, "body must contain 'chain' and 'address'")
+    try:
+        added = await asyncio.to_thread(_discovery().add_watch_token,
+                                        chain_key, address)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"ok": True, "added": added,
+            "message": "watch token added" if added
+                       else "token already tracked on this chain"}
+
+
+@app.delete("/api/watch")
+async def watch_remove(payload: dict = Body(...)):
+    chain_key = (payload.get("chain") or "").strip().lower()
+    address = (payload.get("address") or "").strip()
+    if not chain_key or not address:
+        raise HTTPException(422, "body must contain 'chain' and 'address'")
+    removed = await asyncio.to_thread(_discovery().remove_watch_token,
+                                      chain_key, address)
+    return {"ok": True, "removed": bool(removed)}
+
+
+@app.get("/api/categories")
+def categories():
+    return CATEGORIES
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return DASHBOARD_HTML
@@ -209,7 +264,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <div id="status">Scanner Status: <span class="dot">⚪</span> starting…</div>
 <div id="chains" style="margin:6px 0 14px"></div>
 <div class="filters">
- Chain:<select id="fChain"><option value="all">ALL</option><option value="ethereum">Ethereum</option><option value="bsc">BSC</option></select>
+ Chain:<select id="fChain"><option value="all">ALL</option></select>
  Flow:<select id="fFlow"><option value="all">ALL</option><option>IN</option><option>OUT</option></select>
  Category:<select id="fCat"><option value="all">ALL</option></select>
  Min USD:<input id="fUsd" type="number" value="10000" style="width:100px">
@@ -220,9 +275,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <h2>⬆️ BIG IN</h2><table id="tIn"></table>
 <h2>⬇️ BIG OUT</h2><table id="tOut"></table>
 <h2>🆕 RECENTLY DISCOVERED TOKENS</h2><table id="tTokens"></table>
+<h2>👁️ WATCHED COIN ADDRESSES (big-tx capture)</h2>
+<div class="filters">
+ Chain:<select id="wChain"></select>
+ Address:<input id="wAddr" placeholder="0x… token contract address" style="width:340px">
+ <button id="wAdd" onclick="addWatch()">➕ Add to Watch</button>
+</div>
+<table id="tWatch"></table>
 <script>
-const CATS=["Layer 1","Layer 2","Meme","DeFi","Stablecoin","Gaming","AI","RWA","NFT ecosystem","Utility","New Token","Unknown"];
-document.getElementById('fCat').insertAdjacentHTML('beforeend',CATS.map(c=>`<option>${c}</option>`).join(''));
+
 const fmtUsd=v=>v==null?null:'$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:0});
 const short=a=>a?a.slice(0,6)+'…'+a.slice(-4):'';
 function rows(list){
@@ -233,9 +294,33 @@ function rows(list){
   h+=`<tr><td>${r.token_symbol||short(r.token_address)}</td><td>${r.chain}</td><td>${fl}</td><td>${fmtUsd(r.usd_value)||'—'}</td><td><a target=_blank href=#>${short(r.from)}</a></td><td><a target=_blank href=#>${short(r.to)}</a></td><td>${r.relative_size?r.relative_size+'x':'—'}</td><td class=score>${Math.round(r.anomaly_score)}</td></tr>`;
  } return h;}
 async function j(u){const r=await fetch(u);return r.json();}
+async function jpost(u,body){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return {status:r.status,data:await r.json().catch(()=>({}))};}
+let INITED=false;
+async function initFilters(){
+ if(INITED)return; INITED=true;
+ const cats=await j('/api/categories');
+ document.getElementById('fCat').insertAdjacentHTML('beforeend',cats.map(c=>`<option>${c}</option>`).join(''));
+ const ch=await j('/api/chains');
+ const opts=ch.map(c=>`<option value="${c.key}">${c.name}</option>`).join('');
+ document.getElementById('fChain').insertAdjacentHTML('beforeend',opts);
+ document.getElementById('wChain').innerHTML=opts;
+}
+async function addWatch(){
+ const addr=document.getElementById('wAddr').value.trim();
+ const chain=document.getElementById('wChain').value;
+ if(!addr){alert('enter a token contract address (0x…)');return;}
+ const {status,data}=await jpost('/api/watch',{chain,address:addr});
+ if(status===200){document.getElementById('wAddr').value='';refresh();}
+ else alert(data.detail||JSON.stringify(data));
+}
+async function delWatch(chain,addr){
+ await fetch('/api/watch',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain,address:addr})});
+ refresh();
+}
 function params(extra=''){const p=new URLSearchParams({chain:fChain.value,category:fCat.value,min_usd:fUsd.value,min_score:fScore.value,...(extra?{flow:extra}:{})});return p;}
 async function refresh(){
  try{
+  await initFilters();
   const st=await j('/api/status');
   document.getElementById('mode').textContent=st.mock_mode?'[MOCK DEV MODE]':'';
   const ok=Object.values(st.chains).every(c=>c.connected)&&st.scanner_running;
@@ -249,6 +334,10 @@ async function refresh(){
   let th='<tr><th>ADDRESS</th><th>CHAIN</th><th>SYMBOL</th><th>NAME</th><th>CATEGORY</th><th>SOURCE</th><th>FIRST SEEN</th></tr>';
   for(const t of rt) th+=`<tr><td>${short(t.address)}</td><td>${t.chain}</td><td>${t.symbol||'—'}</td><td>${t.name||'—'}</td><td>${t.category}</td><td>${t.discovery_source}</td><td>${t.first_seen?t.first_seen.slice(0,19)+'Z':'—'}</td></tr>`;
   document.getElementById('tTokens').innerHTML=rt.length?th:'<tr><td>none yet…</td></tr>';
+  const wl=await j('/api/watch');
+  let wh='<tr><th>ADDRESS</th><th>CHAIN</th><th>SYMBOL</th><th>TRANSFERS</th><th>SINCE</th><th></th></tr>';
+  for(const t of wl) wh+=`<tr><td>${short(t.address)}</td><td>${t.chain}</td><td>${t.symbol||'—'}</td><td>${t.transfer_count||0}</td><td>${t.first_seen?t.first_seen.slice(0,19)+'Z':'—'}</td><td><a href="#" onclick="delWatch('${t.chain}','${t.address}');return false">remove</a></td></tr>`;
+  document.getElementById('tWatch').innerHTML=wl.length?wh:'<tr><td>no watched addresses — add a coin contract above to capture every large transaction on it</td></tr>';
  }catch(e){console.error(e);}
 }
 refresh(); setInterval(refresh,5000);

@@ -1,5 +1,1 @@
-# Database files
-*.db
-
-# Logs and temp files
-*.log
+__pycache__/

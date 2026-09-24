@@ -128,6 +128,56 @@ class TokenDiscoveryService:
             self._pairs[chain_pk] = {r[0] for r in rows}
         return self._pairs[chain_pk]
 
+    # ---- monitored ("coin address") watch-list for big-tx capture --------
+    def add_watch_token(self, chain_key: str, address: str) -> bool:
+        """Register a coin/token contract address to monitor explicitly.
+        Returns True if newly added."""
+        addr = (address or "").lower().strip()
+        if not addr or len(addr) != 42:
+            raise ValueError(f"invalid token address: {address!r}")
+        pk = self.chain_pk(chain_key)
+        if pk is None:
+            raise ValueError(f"unknown chain: {chain_key}")
+        with self.session_factory() as s:
+            exists = s.query(Token.id).filter_by(chain_pk=pk, address=addr).first()
+            if exists:
+                return False
+            s.add(Token(chain_pk=pk, address=addr, category="Watched",
+                        discovery_source="manual_watch"))
+            s.commit()
+        self._known.setdefault(pk, set()).add(addr)
+        log.info("watch token added: %s on %s", addr, chain_key)
+        return True
+
+    def remove_watch_token(self, chain_key: str, address: str) -> bool:
+        pk = self.chain_pk(chain_key)
+        if pk is None:
+            return False
+        addr = (address or "").lower().strip()
+        with self.session_factory() as s:
+            n = (s.query(Token)
+                 .filter_by(chain_pk=pk, address=addr,
+                            discovery_source="manual_watch")
+                 .delete())
+            s.commit()
+        cached = self._known.get(pk)
+        if cached:
+            cached.discard(addr)
+        return bool(n)
+
+    def watched_tokens(self, chain_pk: int) -> set[str]:
+        cache_attr = "_watched"
+        cache = getattr(self, cache_attr, None)
+        if cache is None:
+            cache = {}
+            setattr(self, cache_attr, cache)
+        if chain_pk not in cache:
+            with self.session_factory() as s:
+                rows = s.query(Token.address).filter_by(
+                    chain_pk=chain_pk, discovery_source="manual_watch").all()
+            cache[chain_pk] = {r[0] for r in rows}
+        return cache[chain_pk]
+
     def update_price(self, chain_pk: int, address: str, price: float | None,
                      source: str | None, liquidity_usd: float | None = None) -> None:
         if price is None:

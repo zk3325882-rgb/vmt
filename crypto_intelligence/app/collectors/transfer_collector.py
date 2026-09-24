@@ -71,6 +71,9 @@ class TransferCollector:
                            block_ts: dict[int, datetime]) -> None:
         chain_pk = await self._ensure_chain_pk()
         pairs = await asyncio.to_thread(self.discovery.known_pairs, chain_pk)
+        # user-registered coin addresses: every valued transfer on them is
+        # captured as a large transaction (no anomaly-score gate)
+        watched = await asyncio.to_thread(self.discovery.watched_tokens, chain_pk)
         rows_transfers = []
         rows_large = []
         for entry in logs:
@@ -138,7 +141,8 @@ class TransferCollector:
                     self.stats.add(token_addr, usd)
                     self._add_volume(token_addr, usd, ts)
                 if (usd is not None and usd >= settings.min_usd_alert
-                        and res.anomaly_score >= settings.min_anomaly_score):
+                        and (res.anomaly_score >= settings.min_anomaly_score
+                             or token_addr in watched)):
                     rows_large.append(dict(
                         chain_pk=chain_pk, tx_hash=entry.transaction_hash,
                         log_index=entry.log_index, token_address=token_addr,
@@ -150,9 +154,10 @@ class TransferCollector:
                         percentile=res.percentile,
                         anomaly_score=res.anomaly_score,
                         flow=flow, transaction_type=txtype, timestamp=ts))
-                    log.info("LARGE %s %s %s $%s rel=%s score=%s",
+                    log.info("LARGE %s %s %s $%s rel=%s score=%s%s",
                              symbol or token_addr[:10], flow, f"{norm:,.2f}",
-                             f"{usd:,.0f}", res.relative_size, res.anomaly_score)
+                             f"{usd:,.0f}", res.relative_size, res.anomaly_score,
+                             " [watched]" if token_addr in watched else "")
             except Exception as e:
                 log.warning("skipping bad log %s/%s: %s",
                             entry.transaction_hash[:12], entry.log_index, str(e)[:140])
