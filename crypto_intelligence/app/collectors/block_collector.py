@@ -20,7 +20,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from app.blockchain.base import BaseChainAdapter
 from app.collectors.dex_collector import DexCollector, decode_pair_created
 from app.collectors.transfer_collector import TransferCollector
-from app.database.models import Block, Chain, ScannerState, Transaction
+from app.database.models import Block, Chain, ScannerState, Token, Transaction
 from config import TRANSFER_TOPIC, settings
 
 log = logging.getLogger("blocks")
@@ -166,17 +166,38 @@ class BlockCollector:
             if hdr_last:
                 ts_map[to] = datetime.fromtimestamp(hdr_last.timestamp,
                                                     tz=timezone.utc).replace(tzinfo=None)
-        # 2. Transfer logs (event-driven token discovery — no per-contract scans)
-        try:
-            transfer_logs = await self.adapter.get_logs(frm, to, topics=[TRANSFER_TOPIC])
-        except ConnectionError:
-            # narrow the chunk once on "range too large"-style errors
-            mid = (frm + to) // 2
-            if mid > frm:
-                await self._process_range(frm, mid)
-                await self._process_range(mid + 1, to)
-                return
-            raise
+        # 2. Transfer logs (event-driven token discovery — no per-contract scans).
+        # Public RPCs reject unfiltered eth_getLogs ("please specify an
+        # address"), so query discovered/known tokens in address batches;
+        # fall back to an unfiltered scan only when the DB has no tokens yet.
+        from sqlalchemy import distinct
+        with self.session_factory() as s:
+            known = [r[0] for r in s.query(distinct(Token.address))
+                     .filter(Token.chain_pk == self.chain_pk).all()]
+        transfer_logs: list = []
+        if known:
+            BATCH = 50
+            for i in range(0, len(known), BATCH):
+                batch = known[i:i + BATCH]
+                try:
+                    transfer_logs.extend(await self.adapter.get_logs(
+                        frm, to, topics=[TRANSFER_TOPIC], addresses=batch))
+                except ConnectionError as e:
+                    log.warning("[%s] transfer batch fetch %d-%d failed "
+                                "(%d addresses): %s", self.chain_key, frm, to,
+                                len(batch), str(e)[:140])
+        else:
+            try:
+                transfer_logs = await self.adapter.get_logs(
+                    frm, to, topics=[TRANSFER_TOPIC])
+            except ConnectionError:
+                # narrow the chunk once on "range too large"-style errors
+                mid = (frm + to) // 2
+                if mid > frm:
+                    await self._process_range(frm, mid)
+                    await self._process_range(mid + 1, to)
+                    return
+                raise
         # 3. DEX pair-creation events
         pair_events = await self.dex.fetch_events(frm, to)
         if pair_events:

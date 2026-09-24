@@ -12,17 +12,36 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from decimal import Decimal
 
 import httpx
-from sqlalchemy.orm import Session
+
 
 from app.blockchain.base import BaseChainAdapter
 from app.database.models import Chain, Token, TokenPair
 from config import settings
 
 log = logging.getLogger("prices")
+
+
+def _ssl_verify_enabled() -> bool:
+    """Allow opting out of TLS verification on networks with intercepting
+    proxies / corporate root CAs (SSL: CERTIFICATE_VERIFY_FAILED)."""
+    return os.getenv("SSL_VERIFY", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _new_client(timeout: float) -> httpx.AsyncClient:
+    """httpx client that uses the OS certificate store (certifi misses many
+    intermediate setups on Windows) and honours SSL_VERIFY=false."""
+    import ssl
+    ctx = ssl.create_default_context()
+    if not _ssl_verify_enabled():
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        log.warning("TLS certificate verification DISABLED (SSL_VERIFY=false)")
+    return httpx.AsyncClient(timeout=timeout, verify=ctx)
 
 STABLES = {
     "ethereum": {"0xdac17f958d2ee523a2206206994597c13d831ec7": 1.0,   # USDT
@@ -68,7 +87,7 @@ class NativeAssetPrice:
     async def refresh(self) -> None:
         ids = ",".join(c.coingecko_id for c in settings.chains.values())
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with _new_client(10) as client:
                 headers = {}
                 if settings.price_api_key:
                     headers["x-cg-demo-api-key"] = settings.price_api_key
@@ -199,7 +218,7 @@ class CoingeckoProvider(PriceProvider):
             return None
         self._calls = time.time()
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with _new_client(10) as client:
                 r = await client.get(
                     f"{settings.coingecko_url}/simple/token/price",
                     params={"contract_addresses": f"{path}:{token_address}",
