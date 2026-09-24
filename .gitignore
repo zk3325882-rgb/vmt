@@ -4,3 +4,7 @@ __pycache__/
 
 # Environment
 .env
+# Runtime artifacts
+data/*.db
+data/*.log
+data/test_out.txt
