@@ -1,0 +1,20 @@
+{
+  "_comment": "Public, on-chain address labels (observable classifications only). Import additional public label sets here or via the address_labels table. entity_type: exchange|dex|bridge|protocol|treasury|burn|contract|unknown",
+  "ethereum": [
+    {"address": "0x28c6c06298d514db089934071355e5743bf21d60", "label": "Binance 14", "entity_type": "exchange", "confidence": 0.95},
+    {"address": "0x68b3465833fb72a70ecdef46cd56a25da5507a6e", "label": "Coinbase 10", "entity_type": "exchange", "confidence": 0.95},
+    {"address": "0x3cdf098da65e0f171f326ccc125bcd19799cb429", "label": "Kraken 4", "entity_type": "exchange", "confidence": 0.9},
+    {"address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2", "label": "WETH9", "entity_type": "protocol", "confidence": 0.99},
+    {"address": "0xdac17f958d2ee523a2206206994597c13d831ec7", "label": "USDT (Tether)", "entity_type": "protocol", "confidence": 0.99},
+    {"address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", "label": "USDC (Circle)", "entity_type": "protocol", "confidence": 0.99},
+    {"address": "0x7a250d5630b4cf539739df2c5dacb4c659f2488d", "label": "Uniswap V2 Router", "entity_type": "dex", "confidence": 0.99},
+    {"address": "0x68b3465833fb72a70ecdef46cd56a25da5507a6e", "label": "Coinbase Warm 2", "entity_type": "exchange", "source": "manual", "confidence": 0.95}
+  ],
+  "bsc": [
+    {"address": "0xecae5d275ed843bb6e43e4ae4fcb270dac81de18", "label": "Binance Hot Wallet", "entity_type": "exchange", "confidence": 0.95},
+    {"address": "0xf977814e90da44bfa03b6295a0616a897441acec", "label": "Binance 8", "entity_type": "exchange", "confidence": 0.95},
+    {"address": "0x10ed43c715d61eb8b5d0e0acc3c10bbdb12e97ee", "label": "PancakeSwap Router V2", "entity_type": "dex", "confidence": 0.99},
+    {"address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c", "label": "WBNB", "entity_type": "protocol", "confidence": 0.99},
+    {"address": "0x88f08e5fae1a78ea3d3a80e086cc458ca6ad5416", "label": "Binance 28", "entity_type": "exchange", "confidence": 0.9}
+  ]
+}

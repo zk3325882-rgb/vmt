@@ -186,9 +186,11 @@ class MockEVMAdapter(EVMAdapter):
         return self._head + int(time.time() - self._t0) // step
 
     async def get_block_header(self, number: int) -> BlockHeader | None:
-        return BlockHeader(number=number, hash="0x" + f"{number:064x}",
-                           timestamp=int(1700000000 + (number - self._head) * 12
-                                         + time.time()) )
+        # block hash must fit SQLite INTEGER / be sane length; keep real-looking
+        import hashlib as _hl
+        bhash = "0x" + _hl.sha256(f"blk:{self.chain_key}:{number}".encode()).hexdigest()
+        return BlockHeader(number=number, hash=bhash[:66],
+                           timestamp=int(1700000000 + (number % 100000) * 12))
 
     @staticmethod
     def _topic(addr: str) -> str:

@@ -57,9 +57,10 @@ async def test():
     print("PASS db init + token/pair discovery + dedupe")
 
     from app.tokens.metadata import _decode_string
-    enc = ("0x" + "0" * 62 + "20" + "0" * 62 + f"{4:064x}"
-           + b"MOCK".hex().ljust(64, "0"))
-    assert _decode_string(enc) == "MOCK"
+    # proper ABI encoding of string "MOCK": offset=0x20, len=4, padded data
+    enc = ("0x" + "0" * 62 + "20" + "0" * 63 + "4" + b"MOCK".hex().ljust(64, "0"))
+    assert len(enc) == 2 + 192, len(enc)
+    assert _decode_string(enc) == "MOCK", _decode_string(enc)
     print("PASS abi string decode")
 
     # ---------- end-to-end MOCK pipeline ----------

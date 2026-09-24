@@ -86,6 +86,50 @@ CHAINS: dict[str, ChainConfig] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Phase 2 — wallet / whale intelligence configuration (all env-overridable)
+# ---------------------------------------------------------------------------
+
+# Seed address labels are stored in data/address_labels.json (loaded into the
+# address_labels table at init_db time) — never hardcoded in Python source.
+LABELS_FILE = BASE_DIR / "data" / "address_labels.json"
+
+
+@dataclass
+class WalletSettings:
+    """Thresholds for classification, whale scoring, behavior & clustering."""
+    whale_min_score: float = float(os.getenv("WHALE_MIN_SCORE", "60"))
+    wallet_history_days: int = int(os.getenv("WALLET_HISTORY_DAYS", "30"))
+    wallet_snapshot_interval: int = int(os.getenv("WALLET_SNAPSHOT_INTERVAL", "900"))
+    cluster_min_score: float = float(os.getenv("CLUSTER_MIN_SCORE", "55"))
+    max_wallet_analysis_per_block: int = int(
+        os.getenv("MAX_WALLET_ANALYSIS_PER_BLOCK", "100"))
+    # tiering thresholds (portfolio USD)
+    tier1_min_usd: float = float(os.getenv("TIER1_MIN_USD", "500000"))
+    tier2_min_usd: float = float(os.getenv("TIER2_MIN_USD", "20000"))
+    tier2_min_txs: int = int(os.getenv("TIER2_MIN_TXS", "10"))
+    # whale score component weights (absolute / relative / liquidity / activity)
+    w_absolute: float = float(os.getenv("WHALE_W_ABSOLUTE", "0.30"))
+    w_relative: float = float(os.getenv("WHALE_W_RELATIVE", "0.30"))
+    w_liquidity: float = float(os.getenv("WHALE_W_LIQUIDITY", "0.20"))
+    w_activity: float = float(os.getenv("WHALE_W_ACTIVITY", "0.20"))
+    # dynamic large-transfer floor per chain (USD); scaled further by token
+    # liquidity so $100k on a deep pool stays quiet but screams on a thin one
+    whale_floor_usd: dict = field(default_factory=lambda: {
+        "ethereum": float(os.getenv("WHALE_FLOOR_ETH_USD", "50000")),
+        "bsc": float(os.getenv("WHALE_FLOOR_BSC_USD", "10000")),
+    })
+    exchange_label_source: str = os.getenv("EXCHANGE_LABEL_SOURCE", "local")
+    dex_label_source: str = os.getenv("DEX_LABEL_SOURCE", "local")
+    # behavior windows
+    behavior_window_days: int = int(os.getenv("BEHAVIOR_WINDOW_DAYS", "7"))
+    rapid_movement_minutes: int = int(os.getenv("RAPID_MOVEMENT_MINUTES", "30"))
+    common_funder_min_wallets: int = int(os.getenv("COMMON_FUNDER_MIN_WALLETS", "3"))
+
+
+wallet_settings = WalletSettings()
+
+
 @dataclass
 class Settings:
     database_url: str = os.getenv("DATABASE_URL", "") or f"sqlite:///{BASE_DIR / 'data' / 'scanner.db'}"
