@@ -1,4 +1,15 @@
-node_modules/
+# Compiled/Binary files
+__pycache__/
+*.pyc
+
+# Environment/Sensitive files
+.env
+.env.local
+*.env.*
+
+# Database/Temp files
+*.db
+test_out.txtnode_modules/
 .next/
 dist/
 build/
