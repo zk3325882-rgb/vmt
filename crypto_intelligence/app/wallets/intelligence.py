@@ -456,8 +456,8 @@ class WalletIntelligenceService:
                 wtype, conf = "WHALE", round(ws_res.activity_score / 100, 3)
             w.wallet_type = wtype
             w.classification_confidence = conf
-            if labels.get(w.address):
-                w.label = labels[w.address].label
+            if label:
+                w.label = label.label
             beh = compute_behavior(d["inflow"], d["outflow"], d["exch_in"],
                                    d["exch_out"], d["dex_vol"], d["in"] + d["out"])
             alpha = 0.3   # EMA blend so single blocks don't dominate
