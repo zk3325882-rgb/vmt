@@ -18,6 +18,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from app.blockchain.base import BaseChainAdapter
+from app.blockchain.evm import EVMAdapter
 from app.collectors.dex_collector import DexCollector, decode_pair_created
 from app.collectors.transfer_collector import TransferCollector
 from app.database.models import Block, Chain, ScannerState, Token, Transaction
@@ -190,14 +191,22 @@ class BlockCollector:
             try:
                 transfer_logs = await self.adapter.get_logs(
                     frm, to, topics=[TRANSFER_TOPIC])
-            except ConnectionError:
-                # narrow the chunk once on "range too large"-style errors
-                mid = (frm + to) // 2
-                if mid > frm:
-                    await self._process_range(frm, mid)
-                    await self._process_range(mid + 1, to)
-                    return
-                raise
+            except ConnectionError as e:
+                # Node refuses unfiltered log queries (public RPC restriction)
+                # — bisecting cannot help; discovery continues via DEX pair
+                # events below, which register tokens for future filtered pulls.
+                if EVMAdapter._is_unfiltered_rejection(e):
+                    log.info("[%s] unfiltered Transfer scan rejected by node "
+                             "(%s); relying on DEX pair-event discovery",
+                             self.chain_key, str(e)[:120])
+                else:
+                    # narrow the chunk once on "range too large"-style errors
+                    mid = (frm + to) // 2
+                    if mid > frm:
+                        await self._process_range(frm, mid)
+                        await self._process_range(mid + 1, to)
+                        return
+                    raise
         # 3. DEX pair-creation events
         pair_events = await self.dex.fetch_events(frm, to)
         if pair_events:
