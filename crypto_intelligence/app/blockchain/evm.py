@@ -73,31 +73,55 @@ class EVMAdapter(BaseChainAdapter):
         self._url = next(self._urls)
         log.info("[%s] switching RPC endpoint to %s", self.chain_key, self._url)
 
+    @staticmethod
+    def _is_permanent_rpc_error(err: Exception) -> bool:
+        """Errors that switching endpoints / retrying cannot fix.
+
+        Public free RPCs reject unfiltered eth_getLogs outright; retrying the
+        same request on another node just burns time and rate-limit budget.
+        """
+        m = str(err).lower()
+        return ("please specify an address" in m
+                or "-32701" in m                      # alchemy-style restriction
+                or "block range too large" in m
+                or "range too large" in m
+                or "exceed the maximum block range" in m
+                or "query returned more than" in m)   # max-result-count limits
+
     async def _rpc(self, method: str, params: list | None = None):
-        """Single JSON-RPC call with retry/backoff and endpoint failover."""
+        """JSON-RPC call with retry/backoff, endpoint failover and a circuit
+        breaker for permanent errors (retried requests are pinned to the
+        endpoint that served them — only genuine transient failures rotate)."""
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=settings.rpc_timeout)
-        payload = {"jsonrpc": "2.0", "id": next(self._id), "method": method,
-                   "params": params or []}
         delay = 0.5
         last_err: Exception | None = None
+        pinned_url = self._url          # don't re-rotate endpoints on retries
         for attempt in range(settings.max_retries):
+            payload = {"jsonrpc": "2.0", "id": next(self._id), "method": method,
+                       "params": params or []}
             try:
-                resp = await self._client.post(self._url, json=payload)
+                resp = await self._client.post(pinned_url, json=payload)
                 if resp.status_code == 429:
                     raise RuntimeError("rate limited (429)")
                 resp.raise_for_status()
                 data = resp.json()
                 if "error" in data:
-                    raise RuntimeError(f"RPC error: {data['error']}")
+                    err = data["error"]
+                    raise RuntimeError(f"RPC error: {err}")
                 self.connected = True
                 return data["result"]
             except Exception as e:
                 last_err = e
+                if self._is_permanent_rpc_error(e):
+                    # fail fast: caller can adapt (narrow range / add filter)
+                    raise ConnectionError(
+                        f"[{self.chain_key}] RPC {method} permanent error: {e}") from e
                 log.debug("[%s] rpc %s attempt %d failed: %s",
                           self.chain_key, method, attempt + 1, str(e)[:160])
                 if attempt >= 1 and attempt % 2 == 0:
                     await self._switch_url()
+                    pinned_url = self._url
                 await asyncio.sleep(delay + random.uniform(0, delay / 2))
                 delay = min(delay * 2, 30.0)
         raise ConnectionError(f"[{self.chain_key}] RPC {method} failed after retries: {last_err}")
@@ -116,6 +140,31 @@ class EVMAdapter(BaseChainAdapter):
 
     async def get_logs(self, from_block: int, to_block: int,
                        topics=None, addresses=None) -> list[LogEntry]:
+        """Fetch logs, auto-bisecting the range when the node rejects it
+        (too large / too many results / unfiltered-request restrictions)."""
+        try:
+            return await self._get_logs_raw(from_block, to_block, topics, addresses)
+        except ConnectionError as e:
+            msg = str(e).lower()
+            retriable = ("permanent error" in msg
+                         or "range too large" in msg
+                         or "more than" in msg
+                         or "525" in msg or "524" in msg or "timed out" in msg
+                         or "timeout" in msg)
+            if not retriable:
+                raise
+            mid = (from_block + to_block) // 2
+            if mid < to_block:      # can still split
+                log.info("[%s] getLogs %d-%d rejected, bisecting (%s)",
+                         self.chain_key, from_block, to_block,
+                         str(e)[len(f"[{self.chain_key}]"):][:120])
+                left = await self.get_logs(from_block, mid, topics, addresses)
+                right = await self.get_logs(mid + 1, to_block, topics, addresses)
+                return left + right
+            raise
+
+    async def _get_logs_raw(self, from_block: int, to_block: int,
+                            topics, addresses) -> list[LogEntry]:
         params: dict = {"fromBlock": hex(from_block), "toBlock": hex(to_block)}
         if addresses:
             params["address"] = [a.lower() for a in addresses]
