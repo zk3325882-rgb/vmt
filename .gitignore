@@ -14,3 +14,4 @@ test_out.txtnode_modules/
 dist/
 build/
 *.log
+node_modules/
