@@ -218,6 +218,86 @@ class Settings:
 settings = Settings()
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 — signal engine configuration (all env-overridable)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SignalSettings:
+    """Weights & thresholds for the explainable 0-100 signal model.
+    Scores describe observed on-chain evidence intensity only — they are
+    never probabilities of future price movement."""
+    # component weights (kept out of business logic; sum normalised at use)
+    flow_weight: float = float(os.getenv("SIGNAL_W_FLOW", "0.30"))
+    whale_weight: float = float(os.getenv("SIGNAL_W_WHALE", "0.25"))
+    liquidity_weight: float = float(os.getenv("SIGNAL_W_LIQUIDITY", "0.15"))
+    anomaly_weight: float = float(os.getenv("SIGNAL_W_ANOMALY", "0.15"))
+    wallet_weight: float = float(os.getenv("SIGNAL_W_WALLET", "0.10"))
+    market_weight: float = float(os.getenv("SIGNAL_W_MARKET", "0.05"))
+    risk_weight: float = float(os.getenv("SIGNAL_W_RISK", "0.25"))  # penalty scale
+    # evaluation cadence + freshness guard (no look-ahead: features must be
+    # strictly older than the horizon being evaluated)
+    eval_interval_seconds: float = float(os.getenv("SIGNAL_EVAL_INTERVAL", "60"))
+    feature_grace_seconds: int = int(os.getenv("SIGNAL_FEATURE_GRACE", "180"))
+    # lifecycle / dedup
+    cooldown_seconds: int = int(os.getenv("SIGNAL_COOLDOWN_SECONDS", "1800"))
+    active_ttl_seconds: int = int(os.getenv("SIGNAL_ACTIVE_TTL", "7200"))
+    update_threshold: float = float(os.getenv("SIGNAL_UPDATE_THRESHOLD", "5"))
+    min_score_alert: float = float(os.getenv("SIGNAL_MIN_ALERT_SCORE", "60"))
+    # minimum absolute 1h flow before directional signals can fire (USD)
+    min_flow_usd: float = float(os.getenv("SIGNAL_MIN_FLOW_USD", "1000"))
+    # reversal detection: prior net-flow magnitude needed to call a flip
+    reversal_min_prior_usd: float = float(os.getenv("SIGNAL_REVERSAL_MIN_PRIOR", "500"))
+    # score bands (intensity labels only, NOT profit probabilities)
+    bands: tuple = ((20, "VERY_LOW_ACTIVITY"), (40, "LOW"), (60, "MODERATE"),
+                    (75, "ELEVATED"), (90, "HIGH"), (101, "EXTREME"))
+    version: str = os.getenv("SIGNAL_ENGINE_VERSION", "4.0.0")
+    feature_version: str = os.getenv("FEATURE_VERSION", "1.0.0")
+
+
+signal_settings = SignalSettings()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — backtesting / historical outcome configuration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BacktestSettings:
+    """Outcome horizons and classification thresholds. All statistics are
+    DESCRIPTIVE HISTORICAL measurements — never guarantees or calibrated
+    future probabilities."""
+    # horizon name -> seconds (configurable; nothing hardcoded in engines)
+    horizons: dict = field(default_factory=lambda: {
+        "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400,
+        "6h": 21600, "12h": 43200, "24h": 86400, "3d": 259200, "7d": 604800,
+    })
+    # outcome classification thresholds (percent returns), configurable
+    strong_positive_pct: float = float(os.getenv("OUTCOME_STRONG_POS_PCT", "10"))
+    positive_pct: float = float(os.getenv("OUTCOME_POS_PCT", "3"))
+    negative_pct: float = float(os.getenv("OUTCOME_NEG_PCT", "-3"))
+    strong_negative_pct: float = float(os.getenv("OUTCOME_STRONG_NEG_PCT", "-10"))
+    # hit-rate targets used by dashboards/reports
+    hit_targets: tuple = (5.0, 10.0, 20.0)
+    # bootstrap confidence intervals
+    bootstrap_enabled: bool = os.getenv("BOOTSTRAP_ENABLED", "true").lower() in ("1", "true", "yes")
+    bootstrap_samples: int = int(os.getenv("BOOTSTRAP_SAMPLES", "1000"))
+    bootstrap_seed: int = int(os.getenv("BOOTSTRAP_SEED", "42"))
+    # chronological split ratios (train/validation/test) — time-series safe
+    split_train: float = float(os.getenv("SPLIT_TRAIN", "0.6"))
+    split_validation: float = float(os.getenv("SPLIT_VALIDATION", "0.2"))
+    # processing
+    batch_size: int = int(os.getenv("BACKTEST_BATCH_SIZE", "500"))
+    max_rows_per_query: int = int(os.getenv("BACKTEST_MAX_ROWS", "20000"))
+    worker_concurrency: int = int(os.getenv("BACKTEST_CONCURRENCY", "2"))
+    # liquidity buckets for group analysis (USD upper bounds)
+    liquidity_buckets: tuple = (1e5, 5e5, 1e6, 1e7, 1e8)
+    version: str = os.getenv("BACKTEST_VERSION", "5.0.0")
+
+
+backtest_settings = BacktestSettings()
+
+
 # Phase 3 — ERC-4626 vault share events (Deposit/Withdraw with 3 indexed
 # topics) used by the observation-derived pool detector.
 ERC4626_DEPOSIT_TOPIC = "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7"

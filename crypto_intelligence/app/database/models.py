@@ -595,3 +595,242 @@ class FlowAnomaly(Base):
                          name="uq_flow_anomaly_window"),
         Index("ix_anomaly_token_ts", "token_address", "timestamp"),
     )
+
+
+# ===========================================================================
+# PHASE 4 — feature engine / signal engine tables (earlier phases untouched)
+# ===========================================================================
+
+SIGNAL_TYPES = ("ACCUMULATION_SIGNAL", "DISTRIBUTION_SIGNAL",
+                "BULLISH_FLOW_SIGNAL", "BEARISH_FLOW_SIGNAL",
+                "WHALE_ACTIVITY_SIGNAL", "LIQUIDITY_RISK_SIGNAL",
+                "BREAKOUT_LIKE_FLOW_SIGNAL", "CAPITAL_INFLOW_SIGNAL",
+                "CAPITAL_OUTFLOW_SIGNAL", "ANOMALY_SIGNAL", "NEUTRAL_SIGNAL",
+                "FLOW_REVERSAL", "WHALE_BEHAVIOR_REVERSAL",
+                "ONCHAIN_MOMENTUM_SIGNAL", "NEW_TOKEN_ACTIVITY",
+                "NEW_TOKEN_LIQUIDITY", "NEW_TOKEN_WHALE_ACTIVITY",
+                "NEW_TOKEN_FLOW_ANOMALY")
+
+SIGNAL_STATUSES = ("NEW", "ACTIVE", "STRENGTHENING", "WEAKENING",
+                   "INVALIDATED", "EXPIRED")
+
+# positive-direction signal types (used for MFE/MAE interpretation in P5)
+POSITIVE_SIGNAL_TYPES = ("ACCUMULATION_SIGNAL", "BULLISH_FLOW_SIGNAL",
+                         "CAPITAL_INFLOW_SIGNAL", "WHALE_ACTIVITY_SIGNAL",
+                         "BREAKOUT_LIKE_FLOW_SIGNAL", "ONCHAIN_MOMENTUM_SIGNAL")
+NEGATIVE_SIGNAL_TYPES = ("DISTRIBUTION_SIGNAL", "BEARISH_FLOW_SIGNAL",
+                         "CAPITAL_OUTFLOW_SIGNAL", "LIQUIDITY_RISK_SIGNAL")
+
+
+class TokenFeatureSnapshot(Base):
+    """Normalized feature vector per token per time bucket. Built ONLY from
+    data with timestamp <= bucket_end (no look-ahead). These rows are the
+    exact inputs used by the signal engine and stored again on every signal
+    via signal_features, which makes historical reconstruction reproducible."""
+    __tablename__ = "token_feature_snapshots"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    token_address: Mapped[str] = mapped_column(String(64), index=True)
+    bucket_seconds: Mapped[int] = mapped_column(Integer, default=3600, index=True)
+    bucket_start: Mapped[datetime] = mapped_column(DateTime, index=True)
+    features: Mapped[str] = mapped_column(String(8192))   # JSON, normalized floats
+    completeness: Mapped[float | None] = mapped_column(Numeric(5, 2))  # % non-null
+    feature_version: Mapped[str] = mapped_column(String(16), default="1.0.0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("chain_pk", "token_address", "bucket_seconds",
+                         "bucket_start", name="uq_feature_bucket"),
+        Index("ix_feat_token_time", "token_address", "bucket_start"),
+    )
+
+
+class Signal(Base):
+    """Explainable 0-100 on-chain signal. Score = evidence intensity at
+    creation time only; it is NOT a prediction of future price movement."""
+    __tablename__ = "signals"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    token_address: Mapped[str] = mapped_column(String(64), index=True)
+    token_symbol: Mapped[str | None] = mapped_column(String(64))
+    signal_type: Mapped[str] = mapped_column(String(40), index=True)
+    score: Mapped[float] = mapped_column(Numeric(6, 2), index=True)
+    confidence: Mapped[float] = mapped_column(Numeric(6, 2), default=0)
+    quality: Mapped[float] = mapped_column(Numeric(6, 2), default=0)
+    risk_score: Mapped[float] = mapped_column(Numeric(6, 2), default=0, index=True)
+    positive_score: Mapped[float] = mapped_column(Numeric(6, 2), default=0)
+    negative_score: Mapped[float] = mapped_column(Numeric(6, 2), default=0)
+    accumulation_score: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    distribution_score: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    capital_inflow_score: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    capital_outflow_score: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    onchain_momentum_score: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    confirmation_count: Mapped[int] = mapped_column(Integer, default=0)
+    confirmed_features: Mapped[str | None] = mapped_column(String(1024))
+    contradicting_features: Mapped[str | None] = mapped_column(String(1024))
+    band: Mapped[str | None] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(16), default="NEW", index=True)
+    explanation: Mapped[str | None] = mapped_column(String(4096))
+    reasons_json: Mapped[str | None] = mapped_column(String(4096))  # machine-readable
+    alert_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # ---- no-look-ahead integrity fields (mandatory) ----
+    signal_timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
+    feature_timestamp: Mapped[datetime | None] = mapped_column(DateTime)
+    data_timestamp: Mapped[datetime | None] = mapped_column(DateTime)
+    signal_engine_version: Mapped[str] = mapped_column(String(16), default="4.0.0")
+    feature_version: Mapped[str] = mapped_column(String(16), default="1.0.0")
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow,
+                                                 onupdate=utcnow)
+    __table_args__ = (
+        Index("ix_signal_token_type_ts", "token_address", "signal_type",
+              "signal_timestamp"),
+        Index("ix_signal_status_ts", "status", "signal_timestamp"),
+        Index("ix_signal_score_ts", "score", "signal_timestamp"),
+    )
+
+
+class SignalFeature(Base):
+    """Every numeric input that produced a signal, with its contribution.
+    Critical for debugging, backtesting, ML and explainability."""
+    __tablename__ = "signal_features"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), index=True)
+    feature_name: Mapped[str] = mapped_column(String(64), index=True)
+    feature_value: Mapped[float | None] = mapped_column(Numeric(30, 8))
+    feature_normalized: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    feature_contribution: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("signal_id", "feature_name", name="uq_signal_feature"),
+        Index("ix_sigfeat_name", "feature_name", "signal_id"),
+    )
+
+
+class AlertLog(Base):
+    """Deduplicated alert history (cooldown enforced by the alert engine)."""
+    __tablename__ = "alert_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), index=True)
+    channel: Mapped[str] = mapped_column(String(32), default="log")
+    alert_type: Mapped[str] = mapped_column(String(40))
+    message: Mapped[str] = mapped_column(String(4096))
+    dedup_key: Mapped[str] = mapped_column(String(128), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+# ===========================================================================
+# PHASE 5 — backtesting / historical outcome tables
+# ===========================================================================
+
+class Backtest(Base):
+    """Reproducible backtest run record: full configuration + versions."""
+    __tablename__ = "backtests"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str | None] = mapped_column(String(128))
+    configuration: Mapped[str] = mapped_column(String(8192))  # JSON filters
+    signal_engine_version: Mapped[str | None] = mapped_column(String(16))
+    feature_version: Mapped[str | None] = mapped_column(String(16))
+    backtest_version: Mapped[str | None] = mapped_column(String(16))
+    start_date: Mapped[datetime | None] = mapped_column(DateTime)
+    end_date: Mapped[datetime | None] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(16), default="PENDING", index=True)
+    progress: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class HistoricalOutcome(Base):
+    """Outcome of one signal over one horizon. Computed strictly AFTER the
+    horizon elapsed using only post-signal market data; the original signal
+    row is never modified. INCOMPLETE rows carry NULL metrics — missing data
+    is never silently treated as zero."""
+    __tablename__ = "historical_outcomes"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_id: Mapped[int] = mapped_column(ForeignKey("signals.id"), index=True)
+    token_id: Mapped[int | None] = mapped_column(ForeignKey("tokens.id"), index=True)
+    chain_pk: Mapped[int] = mapped_column(ForeignKey("chains.id"), index=True)
+    token_address: Mapped[str] = mapped_column(String(64), index=True)
+    signal_timestamp: Mapped[datetime] = mapped_column(DateTime, index=True)
+    signal_type: Mapped[str] = mapped_column(String(40), index=True)
+    signal_score: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    direction: Mapped[str] = mapped_column(String(8), default="FLAT")  # UP/DOWN/FLAT
+    horizon: Mapped[str] = mapped_column(String(8), index=True)
+    horizon_seconds: Mapped[int] = mapped_column(Integer)
+    price_at_signal: Mapped[float | None] = mapped_column(Numeric(30, 18))
+    price_after: Mapped[float | None] = mapped_column(Numeric(30, 18))
+    return_percent: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    mfe_percent: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    mae_percent: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    mfe_directional: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    mae_directional: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    max_drawdown_percent: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    drawdown_before_target: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    time_to_5pct: Mapped[int | None] = mapped_column(Integer)
+    time_to_10pct: Mapped[int | None] = mapped_column(Integer)
+    time_to_20pct: Mapped[int | None] = mapped_column(Integer)
+    time_to_minus_5pct: Mapped[int | None] = mapped_column(Integer)
+    time_to_minus_10pct: Mapped[int | None] = mapped_column(Integer)
+    outcome_class: Mapped[str | None] = mapped_column(String(24), index=True)
+    hit_5pct: Mapped[bool | None] = mapped_column(Boolean)
+    hit_10pct: Mapped[bool | None] = mapped_column(Boolean)
+    hit_20pct: Mapped[bool | None] = mapped_column(Boolean)
+    volume_change: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    liquidity_change: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    category: Mapped[str | None] = mapped_column(String(32))
+    liquidity_usd: Mapped[float | None] = mapped_column(Numeric(30, 2))
+    whale_participation: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    flow_anomaly_score: Mapped[float | None] = mapped_column(Numeric(6, 2))
+    price_data_completeness: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
+    signal_data_completeness: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
+    liquidity_data_completeness: Mapped[float] = mapped_column(Numeric(5, 2), default=0)
+    data_status: Mapped[str] = mapped_column(String(16), default="OK", index=True)
+    # chronological split label (time-series safe, assigned at compute time)
+    split: Mapped[str | None] = mapped_column(String(8))
+    computed_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("signal_id", "horizon", name="uq_outcome_horizon"),
+        Index("ix_outcome_ts_horizon", "signal_timestamp", "horizon"),
+        Index("ix_outcome_type_horizon", "signal_type", "horizon"),
+        Index("ix_outcome_chain_horizon", "chain_pk", "horizon"),
+    )
+
+
+class BacktestResult(Base):
+    """Aggregated statistics for one (backtest, horizon, group) cell."""
+    __tablename__ = "backtest_results"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    backtest_id: Mapped[int] = mapped_column(ForeignKey("backtests.id"), index=True)
+    horizon: Mapped[str] = mapped_column(String(8), index=True)
+    group_kind: Mapped[str] = mapped_column(String(24), default="ALL")
+    group_value: Mapped[str] = mapped_column(String(64), default="ALL")
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    mean_return: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    median_return: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    std_return: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    min_return: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    max_return: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    p25: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    p75: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    p90: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    mean_mfe: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    mean_mae: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    mean_drawdown: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    hit_rates: Mapped[str | None] = mapped_column(String(512))  # JSON {target: rate}
+    positive_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    negative_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    neutral_rate: Mapped[float | None] = mapped_column(Numeric(8, 4))
+    sharpe_like: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    bootstrap: Mapped[str | None] = mapped_column(String(512))  # JSON CIs
+    histogram: Mapped[str | None] = mapped_column(String(2048))  # JSON bins
+    avg_time_to_5pct: Mapped[float | None] = mapped_column(Numeric(20, 2))
+    avg_time_to_10pct: Mapped[float | None] = mapped_column(Numeric(20, 2))
+    incomplete_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    __table_args__ = (
+        UniqueConstraint("backtest_id", "horizon", "group_kind", "group_value",
+                         name="uq_bt_cell"),
+    )
